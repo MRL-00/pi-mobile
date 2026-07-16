@@ -39,6 +39,31 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Set up a Mac") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        setupStep(1, "Install [Conductor](https://www.conductor.build) and [Bun](https://bun.sh) on your Mac, and run at least one agent session in it.")
+                        setupStep(2, "In Terminal on the Mac, run:")
+                        HStack {
+                            Text(Self.installCommand)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(Theme.accent)
+                                .textSelection(.enabled)
+                            Spacer()
+                            Button {
+                                UIPasteboard.general.string = Self.installCommand
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                        .padding(10)
+                        .background(Theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                        setupStep(3, "It installs the companion server (auto-starts at login) and shows a QR code — scan it with this iPhone's Camera app and the Mac appears here, paired.")
+                        setupStep(4, "Away from home? Install [Tailscale](https://tailscale.com) on both devices, then set the Mac's address here to its Tailscale hostname.")
+                    }
+                    .padding(.vertical, 4)
+                }
+
                 Section("Follow") {
                     Link(destination: URL(string: "https://x.com/codermatt")!) {
                         Label("Follow @codermatt on X", systemImage: "bird")
@@ -56,6 +81,20 @@ struct SettingsView: View {
             .task { await checkStatuses() }
         }
         .tint(Theme.accent)
+    }
+
+    static let installCommand = "curl -fsSL https://raw.githubusercontent.com/MRL-00/conductor-mobile/main/server/install.sh | bash"
+
+    private func setupStep(_ n: Int, _ text: LocalizedStringKey) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text("\(n)")
+                .font(.caption.bold())
+                .frame(width: 20, height: 20)
+                .background(Theme.accent.opacity(0.15), in: Circle())
+                .foregroundStyle(Theme.accent)
+            Text(text)
+                .font(.subheadline)
+        }
     }
 
     private func checkStatuses() async {
