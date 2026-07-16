@@ -265,6 +265,7 @@ struct AttachmentImage: View {
     let sessionId: String
     let attachment: Attachment
     @State private var image: UIImage?
+    @State private var fullscreen = false
 
     var body: some View {
         Group {
@@ -273,6 +274,10 @@ struct AttachmentImage: View {
                     .resizable().scaledToFit()
                     .frame(maxWidth: 240, maxHeight: 300)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .onTapGesture { fullscreen = true }
+                    .fullScreenCover(isPresented: $fullscreen) {
+                        ImageViewer(image: image)
+                    }
             } else {
                 Label(attachment.name, systemImage: "photo")
                     .font(.system(size: 12, design: .monospaced))
@@ -286,6 +291,43 @@ struct AttachmentImage: View {
                 image = UIImage(data: data)
             }
         }
+    }
+}
+
+struct ImageViewer: View {
+    @Environment(\.dismiss) private var dismiss
+    let image: UIImage
+    @State private var scale: CGFloat = 1
+    @State private var lastScale: CGFloat = 1
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.ignoresSafeArea()
+            ScrollView([.horizontal, .vertical], showsIndicators: false) {
+                Image(uiImage: image)
+                    .resizable().scaledToFit()
+                    .containerRelativeFrame(scale <= 1 ? [.horizontal, .vertical] : [])
+                    .frame(width: scale > 1 ? UIScreen.main.bounds.width * scale : nil)
+            }
+            .defaultScrollAnchor(.center)
+            .gesture(
+                MagnifyGesture()
+                    .onChanged { scale = max(1, lastScale * $0.magnification) }
+                    .onEnded { _ in lastScale = scale }
+            )
+            .onTapGesture(count: 2) {
+                withAnimation(.easeOut(duration: 0.2)) { scale = scale > 1 ? 1 : 2.5; lastScale = scale }
+            }
+            Button { dismiss() } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(Color.white.opacity(0.15), in: Circle())
+            }
+            .padding(16)
+        }
+        .preferredColorScheme(.dark)
     }
 }
 

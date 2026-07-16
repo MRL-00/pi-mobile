@@ -28,7 +28,11 @@ struct WorkspacesView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(Theme.bg, for: .navigationBar)
         .navigationDestination(for: Workspace.self) { ChatView(workspace: $0) }
-        .task { await load() }
+        .task {
+            // Route all calls in this repo (and chats below it) to its owning Mac.
+            api.activeMac = api.mac(withId: api.macForRepo[repo.id])
+            await load()
+        }
     }
 
     private var header: some View {

@@ -3,8 +3,10 @@ import SwiftUI
 struct ProjectsView: View {
     @Environment(APIClient.self) private var api
     @State private var repos: [Repo] = []
-    @State private var connected = false
+    @State private var onlineMacs: Set<UUID> = []
     @State private var showSettings = false
+
+    private var connected: Bool { !onlineMacs.isEmpty }
 
     var body: some View {
         NavigationStack {
@@ -42,10 +44,10 @@ struct ProjectsView: View {
                 Button { showSettings = true } label: {
                     HStack(spacing: 7) {
                         Circle()
-                            .fill(connected ? Theme.green : Theme.textMuted)
+                            .fill(connected ? Theme.accent : Theme.textMuted)
                             .frame(width: 7, height: 7)
-                            .shadow(color: connected ? Theme.green : .clear, radius: 4)
-                        Text(connected ? "Mac · online" : "Mac · offline")
+                            .shadow(color: connected ? Theme.accent : .clear, radius: 4)
+                        Text(macPillLabel)
                     }
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Theme.textSecondary)
@@ -63,10 +65,18 @@ struct ProjectsView: View {
         .padding(.bottom, 14)
     }
 
+    private var macPillLabel: String {
+        if api.macs.count <= 1 {
+            let name = api.macs.first?.name ?? "Mac"
+            return "\(name) · \(connected ? "online" : "offline")"
+        }
+        return "\(onlineMacs.count) of \(api.macs.count) Macs online"
+    }
+
     private var subtitle: String {
         connected
             ? "\(repos.count) projects · \(repos.reduce(0) { $0 + $1.activeWorkspaceCount }) active workspaces"
-            : "Check the server address and token in settings."
+            : "Check your Macs in settings."
     }
 
     private var repoCard: some View {
@@ -110,11 +120,16 @@ struct ProjectsView: View {
     }
 
     private func load() async {
-        do {
-            repos = try await api.repos()
-            connected = true
-        } catch {
-            connected = false
+        var all: [Repo] = []
+        var online: Set<UUID> = []
+        for mac in api.macs {
+            if let macRepos = try? await api.repos(on: mac) {
+                online.insert(mac.id)
+                all.append(contentsOf: macRepos)
+                for r in macRepos { api.macForRepo[r.id] = mac.id }
+            }
         }
+        repos = all
+        onlineMacs = online
     }
 }

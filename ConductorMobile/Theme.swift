@@ -9,9 +9,11 @@ enum Theme {
     static let textSecondary = Color(red: 0.788, green: 0.788, blue: 0.82) // #C9C9D1
     static let textTertiary = Color(red: 0.541, green: 0.541, blue: 0.58)  // #8A8A94
     static let textMuted = Color(red: 0.384, green: 0.384, blue: 0.424)    // #62626C
-    static let accent = Color(red: 0.478, green: 0.635, blue: 0.969)      // #7AA2F7
-    static let green = Color(red: 0.29, green: 0.87, blue: 0.5)           // #4ADE80
-    static let amber = Color(red: 0.984, green: 0.749, blue: 0.141)       // #FBBF24
+    static let accent = Color(red: 0.957, green: 0.447, blue: 0.714)      // #F472B6 pink
+    static let sage = Color(red: 0.658, green: 0.804, blue: 0.71)         // muted green for "done"
+    static let champagne = Color(red: 0.898, green: 0.776, blue: 0.53)    // muted gold for "in progress"
+    static let lilac = Color(red: 0.776, green: 0.655, blue: 0.937)       // for "in review"
+    static let green = sage                                               // diff insertions
     static let border = Color.white.opacity(0.1)
     static let separator = Color.white.opacity(0.06)
 }
@@ -23,9 +25,9 @@ struct StatusStyle {
 
     init(_ status: String) {
         switch status {
-        case "done": self.init(label: "Done", color: Theme.green, pulses: false)
-        case "in-review": self.init(label: "In review", color: Theme.accent, pulses: true)
-        case "in-progress": self.init(label: "In progress", color: Theme.amber, pulses: true)
+        case "done": self.init(label: "Done", color: Theme.sage, pulses: false)
+        case "in-review": self.init(label: "In review", color: Theme.lilac, pulses: true)
+        case "in-progress": self.init(label: "In progress", color: Theme.champagne, pulses: true)
         default: self.init(label: "New", color: Color(red: 0.63, green: 0.63, blue: 0.67), pulses: false)
         }
     }
@@ -65,10 +67,10 @@ struct RepoTint {
 
     init(name: String) {
         let palette: [(Color, Color)] = [
-            (Theme.accent.opacity(0.14), Color(red: 0.66, green: 0.72, blue: 0.91)),
-            (Theme.amber.opacity(0.12), Color(red: 0.91, green: 0.81, blue: 0.56)),
-            (Theme.green.opacity(0.10), Color(red: 0.58, green: 0.86, blue: 0.66)),
-            (Color(red: 0.91, green: 0.48, blue: 0.98).opacity(0.12), Color(red: 0.93, green: 0.68, blue: 0.97)),
+            (Theme.accent.opacity(0.13), Color(red: 0.96, green: 0.62, blue: 0.8)),
+            (Theme.lilac.opacity(0.13), Color(red: 0.82, green: 0.72, blue: 0.95)),
+            (Theme.sage.opacity(0.12), Color(red: 0.72, green: 0.84, blue: 0.76)),
+            (Theme.champagne.opacity(0.12), Color(red: 0.91, green: 0.81, blue: 0.62)),
         ]
         let i = abs(name.hashValue) % palette.count
         (bg, fg) = palette[i]
