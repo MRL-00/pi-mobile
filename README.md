@@ -35,11 +35,12 @@ Companion server on the Mac (Bun, single file)
 Requires [Bun](https://bun.sh) and Conductor.
 
 ```sh
-cd server
-bun run server.ts
+curl -fsSL https://raw.githubusercontent.com/MRL-00/conductor-mobile/main/server/install.sh | bash
 ```
 
-The server listens on port `8940` and prints an auth token (persisted in `~/.conductor-companion/token`). Keep the Mac awake for agents to run while you're away (`caffeinate -s bun run server.ts`, or Settings → Battery → prevent sleeping).
+(Or from a checkout: `./server/install.sh`.)
+
+This installs a login LaunchAgent that keeps the server running (and the Mac awake via `caffeinate -s`), auto-restarts it, and prints the auth token for the phone app. Token persists in `~/.conductor-companion/token`; logs in `~/.conductor-companion/server.log`. Uninstall with `./server/install.sh --uninstall`. (Or just run it manually: `cd server && bun run server.ts`.)
 
 ### iPhone
 
