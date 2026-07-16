@@ -29,63 +29,44 @@ struct ChatSession: Identifiable, Codable, Hashable {
     let updatedAt: Date
 
     var isClaude: Bool { agentType == nil || agentType == "claude" }
-
-    // "opus-4-8-1m" → "Opus 4.8 1M", "grok-4.5" → "Grok 4.5", "gpt-5.6-sol" → "GPT-5.6 Sol"
-    var modelLabel: String {
-        guard var m = model else { return "Default" }
-        if let last = m.split(separator: "/").last, m.contains(":") || m.contains("/") { m = String(last) }
-        return m.split(separator: "-").map { part in
-            let p = String(part)
-            if p == "1m" { return "1M" }
-            if p.lowercased().hasPrefix("gpt") { return p.uppercased() }
-            if p.first?.isNumber == true { return p.replacingOccurrences(of: "-", with: ".") }
-            return p.prefix(1).uppercased() + p.dropFirst()
-        }
-        .joined(separator: " ")
-        .replacingOccurrences(of: "4 8", with: "4.8").replacingOccurrences(of: "4 7", with: "4.7")
-        .replacingOccurrences(of: "4 6", with: "4.6").replacingOccurrences(of: "4 5", with: "4.5")
-        .replacingOccurrences(of: "5 6", with: "5.6").replacingOccurrences(of: "5 5", with: "5.5")
-        .replacingOccurrences(of: "2 5", with: "2.5")
-    }
+    var modelLabel: String { prettyModel(model) }
 }
 
-// Claude Code group as shown in Conductor desktop's model picker.
-// Raw values are Claude Code CLI --model ids ("[1m]" = 1M context variant).
-// "Default" (nil) keeps whatever the session already uses.
-// ponytail: Codex/Cursor/OpenCode groups omitted — the server can only drive claude.
-enum PickableModel: String, CaseIterable, Identifiable {
-    case fable = "claude-fable-5"
-    case opus48_1m = "claude-opus-4-8[1m]"
-    case opus47_1m = "claude-opus-4-7[1m]"
-    case opus46_1m = "claude-opus-4-6[1m]"
-    case sonnet5_1m = "claude-sonnet-5[1m]"
-    case sonnet46_1m = "claude-sonnet-4-6[1m]"
-    case sonnet46 = "claude-sonnet-4-6"
-    case haiku = "claude-haiku-4-5"
-
-    var id: String { rawValue }
-    var label: String {
-        switch self {
-        case .fable: "Fable 5"
-        case .opus48_1m: "Opus 4.8 1M"
-        case .opus47_1m: "Opus 4.7 1M"
-        case .opus46_1m: "Opus 4.6 1M"
-        case .sonnet5_1m: "Sonnet 5 1M"
-        case .sonnet46_1m: "Sonnet 4.6 1M"
-        case .sonnet46: "Sonnet 4.6"
-        case .haiku: "Haiku 4.5"
+// Models per harness, as Conductor model ids (matching the desktop picker).
+// The server translates and passes these to each agent's CLI.
+enum HarnessModels {
+    static func options(for agentType: String?) -> [String] {
+        switch agentType ?? "claude" {
+        case "claude": ["fable-5", "opus-4-8-1m", "opus-4-7-1m", "opus-4-6-1m",
+                        "sonnet-5-1m", "sonnet-4-6-1m", "sonnet-4-6", "haiku-4-5"]
+        case "codex": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"]
+        case "cursor": ["auto", "composer-2.5", "grok-4.5"]
+        case "acp": ["opencode:openrouter/moonshotai/kimi-k2.7-code", "opencode:openrouter/z-ai/glm-5.2"]
+        default: []
         }
     }
 }
 
-// Shown in the picker for parity with Conductor desktop, but not selectable:
-// the companion server only drives the claude CLI. Enabling these is phase 3.
-enum DesktopOnlyModels {
-    static let groups: [(title: String, models: [String])] = [
-        ("Codex", ["GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna", "GPT-5.5", "GPT-5.4"]),
-        ("Cursor", ["Auto", "Composer 2.5", "Grok 4.5"]),
-        ("OpenCode", ["openrouter/moonshotai/kimi-k2.7-code", "openrouter/z-ai/glm-5.2"]),
-    ]
+func prettyModel(_ model: String?) -> String {
+    guard var m = model else { return "Default" }
+    if m.contains(":") || m.contains("/"), let last = m.split(separator: "/").last { m = String(last) }
+    return m.split(separator: "-").map { part in
+        let p = String(part)
+        if p == "1m" { return "1M" }
+        if p.lowercased().hasPrefix("gpt") { return p.uppercased() }
+        return p.prefix(1).uppercased() + p.dropFirst()
+    }
+    .joined(separator: " ")
+    .replacingOccurrences(of: "4 8", with: "4.8").replacingOccurrences(of: "4 7", with: "4.7")
+    .replacingOccurrences(of: "4 6", with: "4.6").replacingOccurrences(of: "4 5", with: "4.5")
+    .replacingOccurrences(of: "5 6", with: "5.6").replacingOccurrences(of: "5 5", with: "5.5")
+    .replacingOccurrences(of: "5 4", with: "5.4").replacingOccurrences(of: "2 5", with: "2.5")
+}
+
+struct WorkspaceDiff: Codable {
+    let base: String
+    let stat: String
+    let diff: String
 }
 
 struct AgentStatus: Codable {

@@ -50,6 +50,17 @@ final class APIClient {
     func workspaces(repoId: String) async throws -> [Workspace] { try await get("/repos/\(repoId)/workspaces") }
     func sessions(workspaceId: String) async throws -> [ChatSession] { try await get("/workspaces/\(workspaceId)/sessions") }
     func messages(sessionId: String) async throws -> [ChatMessage] { try await get("/sessions/\(sessionId)/messages") }
+    func createSession(workspaceId: String) async throws -> ChatSession {
+        guard let url = URL(string: baseURL + "/workspaces/\(workspaceId)/sessions") else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, _) = try await URLSession.shared.data(for: request)
+        return try decoder.decode(ChatSession.self, from: data)
+    }
+
+    func diff(workspaceId: String) async throws -> WorkspaceDiff { try await get("/workspaces/\(workspaceId)/diff") }
+
     func send(sessionId: String, text: String, model: String? = nil) async throws {
         var body = ["text": text]
         if let model { body["model"] = model }

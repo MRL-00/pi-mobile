@@ -5,14 +5,17 @@ struct ChatView: View {
     let workspace: Workspace
     @State private var messages: [ChatMessage] = []
     @State private var draft = ""
+    @State private var sessions: [ChatSession] = []
     @State private var session: ChatSession?
+    @State private var showDiff = false
     private var sessionId: String? { session?.id }
     @State private var running = false
     @State private var activity = ""
-    @State private var model: PickableModel?   // nil = session default
+    @State private var model: String?   // Conductor model id; nil = session default
 
     var body: some View {
         VStack(spacing: 0) {
+            if !sessions.isEmpty { tabBar }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(messages) { MessageRow(message: $0, sessionId: sessionId) }
@@ -48,12 +51,71 @@ struct ChatView: View {
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
+                Button { showDiff = true } label: {
+                    Image(systemName: "plus.forwardslash.minus")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 StatusBadge(status: workspace.status)
             }
             .sharedBackgroundVisibility(.hidden)   // drop iOS 26's glass capsule around the badge
         }
+        .sheet(isPresented: $showDiff) { DiffView(workspace: workspace) }
         .task { await load() }
         .refreshable { await load() }
+    }
+
+    // Chat tabs, like the desktop's per-workspace tabs. "+" starts a new (Claude) chat.
+    private var tabBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(sessions) { s in
+                    Button { select(s) } label: {
+                        Text(s.title)
+                            .font(.system(size: 12.5, weight: .medium))
+                            .lineLimit(1)
+                            .foregroundStyle(s.id == sessionId ? Theme.text : Theme.textTertiary)
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(s.id == sessionId ? Color.white.opacity(0.09) : Color.white.opacity(0.03), in: Capsule())
+                    }
+                }
+                Button {
+                    Task {
+                        if let s = try? await api.createSession(workspaceId: workspace.id) {
+                            sessions.insert(s, at: 0)
+                            select(s)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .background(Color.white.opacity(0.05), in: Capsule())
+                }
+            }
+            .padding(.horizontal, 14).padding(.vertical, 8)
+        }
+        .background(Theme.bg)
+        .overlay(alignment: .bottom) { Divider().overlay(Theme.separator) }
+    }
+
+    private func select(_ s: ChatSession) {
+        guard s.id != sessionId else { return }
+        session = s
+        messages = []
+        model = nil
+        running = false
+        Task {
+            await refresh()
+            if let status = try? await api.status(sessionId: s.id), status.running {
+                running = true
+                activity = status.activity
+                await poll()
+            }
+        }
     }
 
     private var streamingBar: some View {
@@ -86,31 +148,16 @@ struct ChatView: View {
         running ? "Agent is working…" : "Message \(workspace.branch ?? workspace.name)"
     }
 
-    private var isClaude: Bool { session?.isClaude ?? true }
-
     private var modelPill: some View {
         Menu {
             Picker("Model", selection: $model) {
-                Text("Default").tag(PickableModel?.none)
-            }
-            Section("Claude Code") {
-                Picker("Claude Code", selection: $model) {
-                    ForEach(PickableModel.allCases) { m in
-                        Text(m.label).tag(PickableModel?.some(m))
-                    }
-                }
-            }
-            // Visible parity with desktop; disabled until the server can drive these CLIs.
-            ForEach(DesktopOnlyModels.groups, id: \.title) { group in
-                Section(group.title) {
-                    ForEach(group.models, id: \.self) { name in
-                        Button(name) {}.disabled(true)
-                    }
+                ForEach(HarnessModels.options(for: session?.agentType), id: \.self) { m in
+                    Text(prettyModel(m)).tag(String?.some(m))
                 }
             }
         } label: {
             HStack(spacing: 5) {
-                Text(model?.label ?? session?.modelLabel ?? "Default")
+                Text(prettyModel(model ?? session?.model))
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .semibold))
                     .opacity(0.5)
@@ -120,8 +167,6 @@ struct ChatView: View {
             .padding(.horizontal, 11).padding(.vertical, 6)
             .background(Color.white.opacity(0.06), in: Capsule())
         }
-        // Model override only works for claude sessions; other harnesses run their session's model.
-        .disabled(!isClaude)
     }
 
     private var composer: some View {
@@ -152,7 +197,7 @@ struct ChatView: View {
         draft = ""
         running = true
         Task {
-            try? await api.send(sessionId: sessionId, text: text, model: model?.rawValue)
+            try? await api.send(sessionId: sessionId, text: text, model: model)
             await refresh()
             await poll()
         }
@@ -170,9 +215,8 @@ struct ChatView: View {
     }
 
     private func load() async {
-        if session == nil {
-            session = try? await api.sessions(workspaceId: workspace.id).first
-        }
+        sessions = (try? await api.sessions(workspaceId: workspace.id)) ?? sessions
+        if session == nil { session = sessions.first }
         await refresh()
         if let sessionId, let status = try? await api.status(sessionId: sessionId), status.running {
             running = true

@@ -31,6 +31,39 @@ const insertMsg = wdb.prepare(
    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
 );
 const updateClaudeSessionId = wdb.prepare(`UPDATE sessions SET claude_session_id = ? WHERE id = ?`);
+const updateSessionModel = wdb.prepare(`UPDATE sessions SET model = ? WHERE id = ?`);
+
+// Conductor model id ("opus-4-8-1m") → claude CLI id ("claude-opus-4-8[1m]")
+const claudeCliModel = (m: string) =>
+  `claude-${m.replace(/-1m$/, "")}` + (m.endsWith("-1m") ? "[1m]" : "");
+
+function createSession(workspaceId: string) {
+  const ws = db.query(`SELECT id FROM workspaces WHERE id = ?`).get(workspaceId);
+  if (!ws) return { error: "workspace not found", status: 404 };
+  const lastModel: any = db
+    .query(`SELECT model FROM sessions WHERE agent_type IS NULL OR agent_type = 'claude' ORDER BY updated_at DESC LIMIT 1`)
+    .get();
+  const id = crypto.randomUUID();
+  wdb.prepare(
+    `INSERT INTO sessions (id, workspace_id, agent_type, model, title, status) VALUES (?, ?, 'claude', ?, 'Untitled', 'idle')`
+  ).run(id, workspaceId, lastModel?.model ?? "opus-4-8-1m");
+  return { id, workspace_id: workspaceId, title: "Untitled", model: lastModel?.model ?? "opus-4-8-1m",
+           agent_type: "claude", updated_at: new Date().toISOString() };
+}
+
+async function workspaceDiff(workspaceId: string) {
+  const ws: any = db
+    .query(`SELECT w.workspace_path, coalesce(w.initialization_parent_branch, r.default_branch, 'main') AS base
+              FROM workspaces w LEFT JOIN repos r ON w.repository_id = r.id WHERE w.id = ?`)
+    .get(workspaceId);
+  if (!ws?.workspace_path || !existsSync(ws.workspace_path)) return { error: "workspace not found", status: 404 };
+  const git = (...a: string[]) =>
+    new Response(Bun.spawn(["git", ...a], { cwd: ws.workspace_path, stdout: "pipe" }).stdout as any).text();
+  const mergeBase = (await git("merge-base", ws.base, "HEAD").catch(() => "")).trim();
+  const ref = mergeBase || ws.base;
+  const [stat, diff] = await Promise.all([git("diff", "--stat", ref), git("diff", ref)]);
+  return { base: ws.base, stat, diff };
+}
 
 type Turn = { proc: ReturnType<typeof Bun.spawn> | null; running: boolean; activity: string };
 const turns = new Map<string, Turn>();
@@ -79,11 +112,14 @@ function sendMessage(sessionId: string, text: string, model?: string) {
   let handleLine: (line: string) => void;
   let cursorText = ""; // cursor streams text deltas; final text arrives in its result event
 
+  if (model) updateSessionModel.run(model, sessionId); // persist the switch, desktop sees it too
+
   if (agent === "claude") {
     args = ["claude", "-p", text, "--output-format", "stream-json", "--verbose",
             "--permission-mode", "acceptEdits"]; // ponytail: no remote approval UI yet
     if (resumeId) args.push("--resume", resumeId);
-    if (model) args.push("--model", model);
+    const m = model ?? session.model;
+    if (m) args.push("--model", claudeCliModel(m));
     handleLine = (line) => {
       const ev = JSON.parse(line);
       if (ev.type === "assistant") {
@@ -100,6 +136,7 @@ function sendMessage(sessionId: string, text: string, model?: string) {
     // Conductor's bundled codex — the nvm-installed one on PATH is broken.
     const codexBin = `${homedir()}/Library/Application Support/com.conductor.app/bin/codex`;
     args = [existsSync(codexBin) ? codexBin : "codex", "exec", "resume", resumeId, "--json", text];
+    if (model) args.push("-m", model);
     handleLine = (line) => {
       const ev = JSON.parse(line);
       const item = ev.item;
@@ -122,7 +159,8 @@ function sendMessage(sessionId: string, text: string, model?: string) {
     // --trust: worktrees Conductor creates aren't in cursor's trusted list; same
     // trust the user already granted this repo on the desktop.
     args = ["cursor-agent", "--resume", resumeId, "-p", text, "--output-format", "stream-json", "--trust"];
-    if (session.model) args.push("--model", session.model);
+    const m = model ?? session.model;
+    if (m) args.push("--model", m);
     handleLine = (line) => {
       const ev = JSON.parse(line);
       if (ev.type === "assistant")
@@ -138,7 +176,7 @@ function sendMessage(sessionId: string, text: string, model?: string) {
     // acp = opencode. Plain-text output; one assistant envelope at the end.
     if (!resumeId) return { error: "opencode session has no resume id", status: 400 };
     args = ["opencode", "run", "--session", resumeId, text];
-    const m = session.model?.replace(/^opencode:/, "");
+    const m = (model ?? session.model)?.replace(/^opencode:/, "");
     if (m) args.push("--model", m);
     handleLine = () => {}; // buffered below instead
   }
@@ -304,6 +342,14 @@ Bun.serve({
           return Response.json({ error: "forbidden" }, { status: 403 });
         if (!existsSync(full)) return Response.json({ error: "not found" }, { status: 404 });
         return new Response(Bun.file(full));
+      }
+      if (req.method === "POST" && (m = path.match(/^\/workspaces\/([^/]+)\/sessions$/))) {
+        const r = createSession(m[1]);
+        return Response.json(r, { status: "status" in r ? (r.status as number) : 200 });
+      }
+      if ((m = path.match(/^\/workspaces\/([^/]+)\/diff$/))) {
+        const r = await workspaceDiff(m[1]);
+        return Response.json(r, { status: "status" in r ? (r.status as number) : 200 });
       }
       if ((m = path.match(/^\/sessions\/([^/]+)\/status$/))) {
         const t = turns.get(m[1]);

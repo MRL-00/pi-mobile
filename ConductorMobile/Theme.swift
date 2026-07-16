@@ -75,17 +75,34 @@ struct RepoTint {
     }
 }
 
+// Pixel identicon derived from the repo name — same idea as the desktop's
+// generated project icons (theirs are app code, so ours match in spirit, not pixels).
 struct GlyphTile: View {
     let name: String
     var size: CGFloat = 38
 
     var body: some View {
         let tint = RepoTint(name: name)
-        Text(String(name.prefix(2)).lowercased())
-            .font(.system(size: size * 0.39, weight: .semibold, design: .monospaced))
-            .foregroundStyle(tint.fg)
-            .frame(width: size, height: size)
-            .background(tint.bg, in: RoundedRectangle(cornerRadius: size * 0.26))
+        Canvas { ctx, canvasSize in
+            let grid = 5
+            let cell = canvasSize.width / CGFloat(grid + 2) // 1-cell padding
+            var seed = UInt64(bitPattern: Int64(name.utf8.reduce(5381) { ($0 << 5) &+ $0 &+ Int($1) }))
+            var bits: [Bool] = []
+            for _ in 0..<15 { // left half + center column, mirrored
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                bits.append((seed >> 33) & 1 == 1)
+            }
+            for row in 0..<grid {
+                for col in 0..<grid {
+                    let src = col < 3 ? col : 4 - col // mirror
+                    guard bits[row * 3 + src] else { continue }
+                    let rect = CGRect(x: cell * CGFloat(col + 1), y: cell * CGFloat(row + 1), width: cell, height: cell)
+                    ctx.fill(Path(rect.insetBy(dx: 0.25, dy: 0.25)), with: .color(tint.fg))
+                }
+            }
+        }
+        .frame(width: size, height: size)
+        .background(tint.bg, in: RoundedRectangle(cornerRadius: size * 0.26))
     }
 }
 
