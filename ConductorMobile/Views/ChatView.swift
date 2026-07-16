@@ -23,12 +23,10 @@ struct ChatView: View {
                 .padding(16)
             }
             .defaultScrollAnchor(.bottom)
-            // safeAreaInset keeps the tabs below iOS 26's floating glass nav bar,
-            // which otherwise renders on top of the first VStack child.
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if !sessions.isEmpty { tabBar }
-            }
             VStack(spacing: 9) {
+                // Tabs live above the composer — iOS 26's nav-bar backdrop covers
+                // anything anchored to the top edge in pushed views.
+                if !sessions.isEmpty { tabBar }
                 if running { streamingBar }
                 composer
             }
@@ -39,7 +37,6 @@ struct ChatView: View {
         }
         .background(Theme.bg)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(Theme.bg, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 2) {
@@ -108,10 +105,8 @@ struct ChatView: View {
                         .background(Color.white.opacity(0.05), in: Capsule())
                 }
             }
-            .padding(.horizontal, 14).padding(.vertical, 8)
+            .padding(.horizontal, 4)
         }
-        .background(Theme.bg)
-        .overlay(alignment: .bottom) { Divider().overlay(Theme.separator) }
     }
 
     private func select(_ s: ChatSession) {
