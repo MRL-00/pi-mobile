@@ -3,7 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(APIClient.self) private var api
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("twitterHandle") private var twitterHandle = ""
+    @AppStorage("twitterHandle") private var twitterHandle = "codermatt"
     @State private var statuses: [UUID: Bool] = [:]
 
     var body: some View {

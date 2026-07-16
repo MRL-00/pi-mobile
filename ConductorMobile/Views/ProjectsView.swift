@@ -36,10 +36,17 @@ struct ProjectsView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Conductor")
-                    .font(.system(size: 28, weight: .bold))
-                    .foregroundStyle(Theme.text)
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("Conductor")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(Theme.text)
+                    Text("Companion")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Theme.accent)
+                        .kerning(2)
+                        .textCase(.uppercase)
+                }
                 Spacer()
                 Button { showSettings = true } label: {
                     HStack(spacing: 7) {
