@@ -102,6 +102,18 @@ final class APIClient {
 
     func mac(withId id: UUID?) -> MacServer? { macs.first { $0.id == id } ?? macs.first }
 
+    // From the pairing QR the server prints: update the Mac with this address
+    // (or a placeholder-token one), else add a new entry.
+    func pair(name: String, baseURL: String, token: String) {
+        if let i = macs.firstIndex(where: { $0.baseURL == baseURL }) {
+            macs[i].name = name
+            macs[i].token = token
+        } else {
+            macs.append(MacServer(name: name, baseURL: baseURL, token: token))
+        }
+        activeMac = macs.first { $0.baseURL == baseURL }
+    }
+
     private let decoder: JSONDecoder = {
         let d = JSONDecoder()
         d.keyDecodingStrategy = .convertFromSnakeCase

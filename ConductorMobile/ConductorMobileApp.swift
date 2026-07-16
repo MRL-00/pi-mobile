@@ -42,6 +42,15 @@ struct ConductorMobileApp: App {
             }
             .environment(api)
             .preferredColorScheme(.dark)
+            // conductor-companion://pair?name=…&addr=…&token=… (QR printed by the server)
+            .onOpenURL { url in
+                guard url.scheme == "conductor-companion", url.host() == "pair",
+                      let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+                      let addr = items.first(where: { $0.name == "addr" })?.value,
+                      let token = items.first(where: { $0.name == "token" })?.value else { return }
+                let name = items.first(where: { $0.name == "name" })?.value ?? "My Mac"
+                api.pair(name: name, baseURL: addr, token: token)
+            }
         }
     }
 }

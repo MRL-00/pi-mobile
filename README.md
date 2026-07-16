@@ -46,6 +46,7 @@ This installs a login LaunchAgent that keeps the server running (and the Mac awa
 
 Open `ConductorMobile.xcodeproj` in Xcode (26+), build to your device (iOS 26+). In the app's Settings, enter:
 
+- Or scan the QR code the server prints with the iPhone camera — it fills in the address and token automatically. Manual entry still works:
 - **Server address** — `http://<your-mac>:8940` (a [Tailscale](https://tailscale.com) hostname makes this work from anywhere)
 - **Auth token** — the token the server printed
 

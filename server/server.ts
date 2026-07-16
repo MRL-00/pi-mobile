@@ -399,3 +399,14 @@ Bun.serve({
 
 console.log(`Conductor companion listening on http://0.0.0.0:${PORT}`);
 console.log(`Auth token: ${TOKEN}`);
+
+// Pairing QR: scan with the iPhone Camera app to open Conductor Companion
+// with the address + token pre-filled.
+import { hostname } from "os";
+import qrcode from "qrcode-terminal"; // bun auto-installs on first run
+const host = hostname().replace(/\.local$/, "");
+const pairURL =
+  `conductor-companion://pair?name=${encodeURIComponent(host)}` +
+  `&addr=${encodeURIComponent(`http://${host}.local:${PORT}`)}&token=${TOKEN}`;
+qrcode.generate(pairURL, { small: true });
+console.log(`Scan with the iPhone camera to pair (same network), or enter the token manually.`);

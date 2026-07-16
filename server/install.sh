@@ -51,8 +51,8 @@ cat > "$PLIST" <<EOF
 EOF
 
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
+: > "$LOG_DIR/server.log"
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
-sleep 1
+sleep 3
 echo "Installed and running. Logs: $LOG_DIR/server.log"
-echo "Auth token for the phone app:"
-cat "$LOG_DIR/token" 2>/dev/null || echo "(starting — check $LOG_DIR/token in a moment)"
+cat "$LOG_DIR/server.log"   # address, token, and pairing QR (scan with the iPhone camera)
