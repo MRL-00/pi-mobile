@@ -3,7 +3,6 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(APIClient.self) private var api
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("twitterHandle") private var twitterHandle = "codermatt"
     @State private var statuses: [UUID: Bool] = [:]
 
     var body: some View {
@@ -41,14 +40,9 @@ struct SettingsView: View {
                 }
 
                 Section("Follow") {
-                    TextField("Your X / Twitter handle", text: $twitterHandle)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    if !cleanHandle.isEmpty, let url = URL(string: "https://x.com/\(cleanHandle)") {
-                        Link(destination: url) {
-                            Label("Follow @\(cleanHandle) on X", systemImage: "bird")
-                                .foregroundStyle(Theme.accent)
-                        }
+                    Link(destination: URL(string: "https://x.com/codermatt")!) {
+                        Label("Follow @codermatt on X", systemImage: "bird")
+                            .foregroundStyle(Theme.accent)
                     }
                 }
 
@@ -62,10 +56,6 @@ struct SettingsView: View {
             .task { await checkStatuses() }
         }
         .tint(Theme.accent)
-    }
-
-    private var cleanHandle: String {
-        twitterHandle.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "@", with: "")
     }
 
     private func checkStatuses() async {
