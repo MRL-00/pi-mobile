@@ -218,10 +218,15 @@ struct ChatView: View {
         guard let sessionId else { return }
         while running {
             try? await Task.sleep(for: .seconds(1.5))
-            let status = try? await api.status(sessionId: sessionId)
-            activity = status?.activity ?? ""
+            if Task.isCancelled { return }
+            // ponytail: any failed status check stops polling; pull-to-refresh restarts it
+            guard let status = try? await api.status(sessionId: sessionId) else {
+                running = false
+                return
+            }
+            activity = status.activity
             await refresh()
-            if status?.running == false { running = false }
+            if !status.running { running = false }
         }
     }
 

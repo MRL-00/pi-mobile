@@ -60,6 +60,11 @@ struct StatusBadge: View {
     }
 }
 
+// Stable across launches, unlike String.hashValue. Shared by RepoTint and GlyphTile.
+func djb2(_ s: String) -> Int {
+    s.utf8.reduce(5381) { ($0 << 5) &+ $0 &+ Int($1) }
+}
+
 // Deterministic tint per repo name, matching the design's tinted glyph tiles.
 struct RepoTint {
     let bg: Color
@@ -72,8 +77,8 @@ struct RepoTint {
             (Theme.sage.opacity(0.12), Color(red: 0.72, green: 0.84, blue: 0.76)),
             (Theme.champagne.opacity(0.12), Color(red: 0.91, green: 0.81, blue: 0.62)),
         ]
-        let i = abs(name.hashValue) % palette.count
-        (bg, fg) = palette[i]
+        // String.hashValue is seeded per launch; djb2 keeps the tint stable.
+        (bg, fg) = palette[abs(djb2(name)) % palette.count]
     }
 }
 
@@ -88,7 +93,7 @@ struct GlyphTile: View {
         Canvas { ctx, canvasSize in
             let grid = 5
             let cell = canvasSize.width / CGFloat(grid + 2) // 1-cell padding
-            var seed = UInt64(bitPattern: Int64(name.utf8.reduce(5381) { ($0 << 5) &+ $0 &+ Int($1) }))
+            var seed = UInt64(bitPattern: Int64(djb2(name)))
             var bits: [Bool] = []
             for _ in 0..<15 { // left half + center column, mirrored
                 seed = seed &* 6364136223846793005 &+ 1442695040888963407

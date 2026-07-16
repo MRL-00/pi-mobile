@@ -30,7 +30,7 @@ struct WorkspacesView: View {
         .navigationDestination(for: Workspace.self) { ChatView(workspace: $0) }
         .task {
             // Route all calls in this repo (and chats below it) to its owning Mac.
-            api.activeMac = api.mac(withId: api.macForRepo[repo.id])
+            api.activeMac = api.mac(withId: repo.macId)
             await load()
         }
     }

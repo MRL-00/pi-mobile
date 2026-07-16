@@ -7,6 +7,9 @@ struct Repo: Identifiable, Codable, Hashable {
     let name: String
     let defaultBranch: String?
     let activeWorkspaceCount: Int
+    // Set client-side after fetching: repo ids are only unique per Mac, so the
+    // owning Mac is part of a repo's identity when lists are merged.
+    var macId: UUID? = nil
 }
 
 struct Workspace: Identifiable, Codable, Hashable {

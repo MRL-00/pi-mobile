@@ -88,7 +88,7 @@ struct ProjectsView: View {
 
     private var repoCard: some View {
         VStack(spacing: 0) {
-            ForEach(Array(repos.enumerated()), id: \.element.id) { i, repo in
+            ForEach(Array(repos.enumerated()), id: \.element) { i, repo in
                 NavigationLink(value: repo) {
                     HStack(spacing: 12) {
                         GlyphTile(name: repo.name)
@@ -132,8 +132,10 @@ struct ProjectsView: View {
         for mac in api.macs {
             if let macRepos = try? await api.repos(on: mac) {
                 online.insert(mac.id)
-                all.append(contentsOf: macRepos)
-                for r in macRepos { api.macForRepo[r.id] = mac.id }
+                for var r in macRepos {
+                    r.macId = mac.id
+                    all.append(r)
+                }
             }
         }
         repos = all

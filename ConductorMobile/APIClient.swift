@@ -1,33 +1,101 @@
 import Foundation
 import Observation
+import Security
 
 struct MacServer: Codable, Identifiable, Hashable {
     var id = UUID()
     var name: String
     var baseURL: String
     var token: String
+
+    // Tokens live in the Keychain, not the UserDefaults blob. Decoding still
+    // reads `token` if present so pre-Keychain saves migrate cleanly.
+    private enum CodingKeys: String, CodingKey { case id, name, baseURL, token }
+
+    init(id: UUID = UUID(), name: String, baseURL: String, token: String) {
+        self.id = id
+        self.name = name
+        self.baseURL = baseURL
+        self.token = token
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        baseURL = try c.decode(String.self, forKey: .baseURL)
+        token = try c.decodeIfPresent(String.self, forKey: .token) ?? ""
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(baseURL, forKey: .baseURL)
+    }
+}
+
+enum TokenStore {
+    private static func query(_ id: UUID) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: "conductor-mobile.mac-token",
+         kSecAttrAccount as String: id.uuidString]
+    }
+
+    static func set(_ token: String, for id: UUID) {
+        SecItemDelete(query(id) as CFDictionary)
+        guard !token.isEmpty else { return }
+        var attrs = query(id)
+        attrs[kSecValueData as String] = Data(token.utf8)
+        attrs[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        SecItemAdd(attrs as CFDictionary, nil)
+    }
+
+    static func get(for id: UUID) -> String? {
+        var attrs = query(id)
+        attrs[kSecReturnData as String] = true
+        var result: AnyObject?
+        guard SecItemCopyMatching(attrs as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
 }
 
 @Observable
 final class APIClient {
     var macs: [MacServer] {
-        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(macs), forKey: "macs") }
+        didSet {
+            UserDefaults.standard.set(try? JSONEncoder().encode(macs), forKey: "macs")
+            for mac in macs { TokenStore.set(mac.token, for: mac.id) }
+        }
     }
     // The Mac owning whatever repo the user is currently inside. Navigation is a
     // single flow, so one active Mac at a time is enough.
     var activeMac: MacServer?
-    // repo id → mac id, filled while listing projects
-    var macForRepo: [String: UUID] = [:]
 
     init() {
         if let data = UserDefaults.standard.data(forKey: "macs"),
-           let saved = try? JSONDecoder().decode([MacServer].self, from: data), !saved.isEmpty {
+           var saved = try? JSONDecoder().decode([MacServer].self, from: data), !saved.isEmpty {
+            for i in saved.indices {
+                // Keychain wins; a decoded token means a pre-Keychain save to migrate.
+                if let token = TokenStore.get(for: saved[i].id) {
+                    saved[i].token = token
+                } else if !saved[i].token.isEmpty {
+                    TokenStore.set(saved[i].token, for: saved[i].id)
+                }
+            }
             macs = saved
+            // Re-save so any legacy plaintext token is dropped from UserDefaults.
+            UserDefaults.standard.set(try? JSONEncoder().encode(saved), forKey: "macs")
         } else {
             // Migrate the single-server settings from earlier versions.
             let url = UserDefaults.standard.string(forKey: "baseURL") ?? "http://127.0.0.1:8940"
             let token = UserDefaults.standard.string(forKey: "token") ?? ""
-            macs = [MacServer(name: "My Mac", baseURL: url, token: token)]
+            let mac = MacServer(name: "My Mac", baseURL: url, token: token)
+            TokenStore.set(token, for: mac.id)
+            UserDefaults.standard.removeObject(forKey: "token")
+            UserDefaults.standard.set(try? JSONEncoder().encode([mac]), forKey: "macs")
+            macs = [mac]
         }
         activeMac = macs.first
     }
@@ -86,10 +154,11 @@ final class APIClient {
     }
 
     func attachment(sessionId: String, path: String) async throws -> Data {
-        guard let mac = activeMac else { throw URLError(.badURL) }
-        var comps = URLComponents(string: mac.baseURL + "/sessions/\(sessionId)/attachments")!
+        guard let mac = activeMac,
+              var comps = URLComponents(string: mac.baseURL + "/sessions/\(sessionId)/attachments") else { throw URLError(.badURL) }
         comps.queryItems = [URLQueryItem(name: "path", value: path)]
-        var request = URLRequest(url: comps.url!)
+        guard let url = comps.url else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
         request.setValue("Bearer \(mac.token)", forHTTPHeaderField: "Authorization")
         let (data, _) = try await URLSession.shared.data(for: request)
         return data
