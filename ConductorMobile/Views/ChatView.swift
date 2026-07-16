@@ -157,9 +157,13 @@ struct ChatView: View {
 
     private var modelPill: some View {
         Menu {
-            Picker("Model", selection: $model) {
-                ForEach(HarnessModels.options(for: session?.agentType), id: \.self) { m in
-                    Text(prettyModel(m)).tag(String?.some(m))
+            ForEach(HarnessModels.groups, id: \.title) { group in
+                Section(group.title) {
+                    Picker(group.title, selection: $model) {
+                        ForEach(group.models, id: \.self) { m in
+                            Text(prettyModel(m)).tag(String?.some(m))
+                        }
+                    }
                 }
             }
         } label: {

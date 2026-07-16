@@ -76,9 +76,21 @@ function sendMessage(sessionId: string, text: string, model?: string) {
     .query(`SELECT s.*, w.workspace_path FROM sessions s JOIN workspaces w ON s.workspace_id = w.id WHERE s.id = ?`)
     .get(sessionId);
   if (!session) return { error: "session not found", status: 404 };
-  const agent = session.agent_type ?? "claude";
+  // Picking a model from a different harness switches the session's agent and
+  // starts a fresh thread for it — same behavior as the desktop picker.
+  const agentForModel = (m: string) =>
+    m.startsWith("gpt-") ? "codex"
+    : m.startsWith("opencode:") ? "acp"
+    : ["auto", "composer", "grok"].some(p => m.startsWith(p)) ? "cursor"
+    : "claude";
+  const agent = model ? agentForModel(model) : (session.agent_type ?? "claude");
   if (!["claude", "codex", "cursor", "acp"].includes(agent))
     return { error: `unsupported agent type: ${agent}`, status: 400 };
+  if (model && agent !== (session.agent_type ?? "claude")) {
+    wdb.prepare(`UPDATE sessions SET agent_type = ?, claude_session_id = NULL WHERE id = ?`).run(agent, sessionId);
+    session.agent_type = agent;
+    session.claude_session_id = null;
+  }
   if (!session.workspace_path || !existsSync(session.workspace_path))
     return { error: "workspace directory not found on this Mac", status: 400 };
 
@@ -132,10 +144,11 @@ function sendMessage(sessionId: string, text: string, model?: string) {
       }
     };
   } else if (agent === "codex") {
-    if (!resumeId) return { error: "codex session has no resume id", status: 400 };
     // Conductor's bundled codex — the nvm-installed one on PATH is broken.
     const codexBin = `${homedir()}/Library/Application Support/com.conductor.app/bin/codex`;
-    args = [existsSync(codexBin) ? codexBin : "codex", "exec", "resume", resumeId, "--json", text];
+    args = resumeId
+      ? [existsSync(codexBin) ? codexBin : "codex", "exec", "resume", resumeId, "--json", text]
+      : [existsSync(codexBin) ? codexBin : "codex", "exec", "--json", text];
     if (model) args.push("-m", model);
     handleLine = (line) => {
       const ev = JSON.parse(line);
@@ -151,14 +164,16 @@ function sendMessage(sessionId: string, text: string, model?: string) {
           pushEnv([{ type: "tool_use", id: crypto.randomUUID(), name: "Edit",
                      input: { file_path: item.changes?.map((c: any) => c.path).join(", ") ?? "" } }]);
         }
+      } else if (ev.type === "thread.started" && ev.thread_id) {
+        updateClaudeSessionId.run(ev.thread_id, sessionId); // fresh codex thread — remember it
       } else if (ev.type === "turn.completed") resultEnv({ usage: ev.usage });
       else if (ev.type === "error") pushEnv([{ type: "text", text: `⚠️ ${ev.message}` }]);
     };
   } else if (agent === "cursor") {
-    if (!resumeId) return { error: "cursor session has no resume id", status: 400 };
     // --trust: worktrees Conductor creates aren't in cursor's trusted list; same
     // trust the user already granted this repo on the desktop.
-    args = ["cursor-agent", "--resume", resumeId, "-p", text, "--output-format", "stream-json", "--trust"];
+    args = ["cursor-agent", "-p", text, "--output-format", "stream-json", "--trust"];
+    if (resumeId) args.push("--resume", resumeId);
     const m = model ?? session.model;
     if (m) args.push("--model", m);
     handleLine = (line) => {
@@ -170,11 +185,13 @@ function sendMessage(sessionId: string, text: string, model?: string) {
         const final = ev.result || cursorText;
         if (final) pushEnv([{ type: "text", text: final }]);
         push("assistant", line, crypto.randomUUID());
+        if (!resumeId && ev.session_id) updateClaudeSessionId.run(ev.session_id, sessionId);
       }
     };
   } else {
     // acp = opencode. Plain-text output; one assistant envelope at the end.
-    if (!resumeId) return { error: "opencode session has no resume id", status: 400 };
+    if (!resumeId)
+      return { error: "OpenCode chats have to be started from the desktop for now", status: 400 };
     args = ["opencode", "run", "--session", resumeId, text];
     const m = (model ?? session.model)?.replace(/^opencode:/, "");
     if (m) args.push("--model", m);

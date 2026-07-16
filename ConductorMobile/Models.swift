@@ -32,19 +32,16 @@ struct ChatSession: Identifiable, Codable, Hashable {
     var modelLabel: String { prettyModel(model) }
 }
 
-// Models per harness, as Conductor model ids (matching the desktop picker).
-// The server translates and passes these to each agent's CLI.
+// All model groups, as Conductor model ids (matching the desktop picker).
+// Picking a model from a different harness switches the chat's agent, like the desktop.
 enum HarnessModels {
-    static func options(for agentType: String?) -> [String] {
-        switch agentType ?? "claude" {
-        case "claude": ["fable-5", "opus-4-8-1m", "opus-4-7-1m", "opus-4-6-1m",
-                        "sonnet-5-1m", "sonnet-4-6-1m", "sonnet-4-6", "haiku-4-5"]
-        case "codex": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"]
-        case "cursor": ["auto", "composer-2.5", "grok-4.5"]
-        case "acp": ["opencode:openrouter/moonshotai/kimi-k2.7-code", "opencode:openrouter/z-ai/glm-5.2"]
-        default: []
-        }
-    }
+    static let groups: [(title: String, models: [String])] = [
+        ("Claude Code", ["fable-5", "opus-4-8-1m", "opus-4-7-1m", "opus-4-6-1m",
+                         "sonnet-5-1m", "sonnet-4-6-1m", "sonnet-4-6", "haiku-4-5"]),
+        ("Codex", ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"]),
+        ("Cursor", ["auto", "composer-2.5", "grok-4.5"]),
+        ("OpenCode", ["opencode:openrouter/moonshotai/kimi-k2.7-code", "opencode:openrouter/z-ai/glm-5.2"]),
+    ]
 }
 
 func prettyModel(_ model: String?) -> String {
