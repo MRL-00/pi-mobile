@@ -8,6 +8,7 @@ struct ChatView: View {
     @State private var sessions: [ChatSession] = []
     @State private var session: ChatSession?
     @State private var showDiff = false
+    @State private var diffStat: DiffStat?
     private var sessionId: String? { session?.id }
     @State private var running = false
     @State private var activity = ""
@@ -15,7 +16,6 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if !sessions.isEmpty { tabBar }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(messages) { MessageRow(message: $0, sessionId: sessionId) }
@@ -23,6 +23,11 @@ struct ChatView: View {
                 .padding(16)
             }
             .defaultScrollAnchor(.bottom)
+            // safeAreaInset keeps the tabs below iOS 26's floating glass nav bar,
+            // which otherwise renders on top of the first VStack child.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if !sessions.isEmpty { tabBar }
+            }
             VStack(spacing: 9) {
                 if running { streamingBar }
                 composer
@@ -51,12 +56,19 @@ struct ChatView: View {
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Button { showDiff = true } label: {
-                    Image(systemName: "plus.forwardslash.minus")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Theme.textSecondary)
+                if let stat = diffStat, !stat.isEmpty {
+                    Button { showDiff = true } label: {
+                        HStack(spacing: 4) {
+                            Text("+\(compactCount(stat.insertions))").foregroundStyle(Theme.green)
+                            Text("−\(compactCount(stat.deletions))").foregroundStyle(Color(red: 0.95, green: 0.57, blue: 0.56))
+                        }
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .padding(.horizontal, 7).padding(.vertical, 4)
+                        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                    }
                 }
             }
+            .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .topBarTrailing) {
                 StatusBadge(status: workspace.status)
             }
@@ -217,6 +229,7 @@ struct ChatView: View {
     private func load() async {
         sessions = (try? await api.sessions(workspaceId: workspace.id)) ?? sessions
         if session == nil { session = sessions.first }
+        diffStat = try? await api.diffStat(workspaceId: workspace.id)
         await refresh()
         if let sessionId, let status = try? await api.status(sessionId: sessionId), status.running {
             running = true

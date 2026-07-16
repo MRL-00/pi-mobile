@@ -63,6 +63,18 @@ func prettyModel(_ model: String?) -> String {
     .replacingOccurrences(of: "5 4", with: "5.4").replacingOccurrences(of: "2 5", with: "2.5")
 }
 
+struct DiffStat: Codable {
+    let insertions: Int
+    let deletions: Int
+
+    var isEmpty: Bool { insertions == 0 && deletions == 0 }
+}
+
+// 1470 → "1.4k"
+func compactCount(_ n: Int) -> String {
+    n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : String(n)
+}
+
 struct WorkspaceDiff: Codable {
     let base: String
     let stat: String

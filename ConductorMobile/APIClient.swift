@@ -60,6 +60,7 @@ final class APIClient {
     }
 
     func diff(workspaceId: String) async throws -> WorkspaceDiff { try await get("/workspaces/\(workspaceId)/diff") }
+    func diffStat(workspaceId: String) async throws -> DiffStat { try await get("/workspaces/\(workspaceId)/diffstat") }
 
     func send(sessionId: String, text: String, model: String? = nil) async throws {
         var body = ["text": text]

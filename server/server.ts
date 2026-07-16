@@ -347,6 +347,20 @@ Bun.serve({
         const r = createSession(m[1]);
         return Response.json(r, { status: "status" in r ? (r.status as number) : 200 });
       }
+      if ((m = path.match(/^\/workspaces\/([^/]+)\/diffstat$/))) {
+        const ws: any = db
+          .query(`SELECT w.workspace_path, coalesce(w.initialization_parent_branch, r.default_branch, 'main') AS base
+                    FROM workspaces w LEFT JOIN repos r ON w.repository_id = r.id WHERE w.id = ?`)
+          .get(m[1]);
+        if (!ws?.workspace_path || !existsSync(ws.workspace_path)) return Response.json({ error: "not found" }, { status: 404 });
+        const git = (...a: string[]) =>
+          new Response(Bun.spawn(["git", ...a], { cwd: ws.workspace_path, stdout: "pipe" }).stdout as any).text();
+        const mb = (await git("merge-base", ws.base, "HEAD").catch(() => "")).trim();
+        const short = await git("diff", "--shortstat", mb || ws.base);
+        const ins = Number(short.match(/(\d+) insertion/)?.[1] ?? 0);
+        const del = Number(short.match(/(\d+) deletion/)?.[1] ?? 0);
+        return Response.json({ insertions: ins, deletions: del });
+      }
       if ((m = path.match(/^\/workspaces\/([^/]+)\/diff$/))) {
         const r = await workspaceDiff(m[1]);
         return Response.json(r, { status: "status" in r ? (r.status as number) : 200 });
