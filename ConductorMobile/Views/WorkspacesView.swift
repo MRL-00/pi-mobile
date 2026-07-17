@@ -29,6 +29,20 @@ struct WorkspacesView: View {
         .background(Theme.bg)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(Theme.bg, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Task { await createWorkspace() }
+                } label: {
+                    if creating {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "plus")
+                    }
+                }
+                .disabled(creating)
+            }
+        }
         .navigationDestination(for: Workspace.self) { ChatView(workspace: $0) }
         .navigationDestination(item: $newWorkspace) { ChatView(workspace: $0) }
         .task {
@@ -48,18 +62,6 @@ struct WorkspacesView: View {
             Text(workspaces.isEmpty ? "" : "\(workspaces.count) workspace\(workspaces.count == 1 ? "" : "s")")
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.textMuted)
-            Button {
-                Task { await createWorkspace() }
-            } label: {
-                if creating {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "plus")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Theme.accent)
-                }
-            }
-            .disabled(creating)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
