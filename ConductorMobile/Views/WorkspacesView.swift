@@ -5,6 +5,8 @@ struct WorkspacesView: View {
     let repo: Repo
     @State private var workspaces: [Workspace] = []
     @State private var loaded = false
+    @State private var creating = false
+    @State private var newWorkspace: Workspace?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,6 +30,7 @@ struct WorkspacesView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(Theme.bg, for: .navigationBar)
         .navigationDestination(for: Workspace.self) { ChatView(workspace: $0) }
+        .navigationDestination(item: $newWorkspace) { ChatView(workspace: $0) }
         .task {
             // Route all calls in this repo (and chats below it) to its owning Mac.
             api.activeMac = api.mac(withId: repo.macId)
@@ -45,6 +48,18 @@ struct WorkspacesView: View {
             Text(workspaces.isEmpty ? "" : "\(workspaces.count) workspace\(workspaces.count == 1 ? "" : "s")")
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.textMuted)
+            Button {
+                Task { await createWorkspace() }
+            } label: {
+                if creating {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "plus")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                }
+            }
+            .disabled(creating)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -63,6 +78,16 @@ struct WorkspacesView: View {
         }
         .padding(.horizontal, 40)
         .padding(.top, 80)
+    }
+
+    // Creates a fresh worktree + session on the Mac and jumps straight into the chat.
+    private func createWorkspace() async {
+        creating = true
+        defer { creating = false }
+        if let ws = try? await api.createWorkspace(repoId: repo.id) {
+            workspaces.insert(ws, at: 0)
+            newWorkspace = ws
+        }
     }
 
     private func load() async {

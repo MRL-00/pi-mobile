@@ -161,6 +161,10 @@ final class APIClient {
 
     func stop(sessionId: String) async throws { _ = try await post("/sessions/\(sessionId)/stop") }
 
+    func createWorkspace(repoId: String) async throws -> Workspace {
+        try decoder.decode(Workspace.self, from: try await post("/repos/\(repoId)/workspaces"))
+    }
+
     func createSession(workspaceId: String) async throws -> ChatSession {
         try decoder.decode(ChatSession.self, from: try await post("/workspaces/\(workspaceId)/sessions"))
     }

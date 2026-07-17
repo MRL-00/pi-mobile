@@ -51,6 +51,33 @@ function createSession(workspaceId: string) {
            agent_type: "claude", updated_at: new Date().toISOString() };
 }
 
+// New workspace from the phone: a real git worktree in Conductor's own layout
+// (~/conductor/workspaces/<repo>/<city>) plus a workspaces row, so the desktop
+// app picks it up like any other. Undocumented schema — fails loud if it drifts.
+const CITIES = ["lisbon","porto","quito","nairobi","hanoi","tbilisi","perth","leipzig","malmo","bergen","cusco","davao","hobart","tampere","galway","split"];
+function createWorkspace(repoId: string) {
+  const repo: any = db.query(`SELECT id, name, root_path, default_branch FROM repos WHERE id = ?`).get(repoId);
+  if (!repo?.root_path || !existsSync(repo.root_path)) return { error: "repo not found", status: 404 };
+  const taken = new Set(
+    db.query(`SELECT directory_name FROM workspaces WHERE repository_id = ?`).all(repoId).map((w: any) => w.directory_name)
+  );
+  const city = CITIES.find((c) => !taken.has(c)) ?? `mobile-${Date.now()}`;
+  const path = `${homedir()}/conductor/workspaces/${repo.name}/${city}`;
+  const branch = `mobile/${city}`;
+  const git = Bun.spawnSync(["git", "worktree", "add", "-b", branch, path], { cwd: repo.root_path });
+  if (git.exitCode !== 0)
+    return { error: `git worktree failed: ${git.stderr.toString().trim()}`, status: 500 };
+  const id = crypto.randomUUID();
+  wdb.prepare(
+    `INSERT INTO workspaces (id, repository_id, directory_name, workspace_name, branch, workspace_path,
+                             initialization_parent_branch, state, derived_status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 'in-progress')`
+  ).run(id, repoId, city, city, branch, path, repo.default_branch ?? "main");
+  const session = createSession(id);
+  return { id, repository_id: repoId, name: city, branch, status: "in-progress", unread: false,
+           updated_at: new Date().toISOString(), last_message_snippet: null, session };
+}
+
 async function workspaceDiff(workspaceId: string) {
   const ws: any = db
     .query(`SELECT w.workspace_path, coalesce(w.initialization_parent_branch, r.default_branch, 'main') AS base
@@ -359,6 +386,10 @@ Bun.serve({
           return Response.json({ error: "forbidden" }, { status: 403 });
         if (!existsSync(full)) return Response.json({ error: "not found" }, { status: 404 });
         return new Response(Bun.file(full));
+      }
+      if (req.method === "POST" && (m = path.match(/^\/repos\/([^/]+)\/workspaces$/))) {
+        const r = createWorkspace(m[1]);
+        return "error" in r ? Response.json({ error: r.error }, { status: r.status }) : Response.json(r);
       }
       if (req.method === "POST" && (m = path.match(/^\/workspaces\/([^/]+)\/sessions$/))) {
         const r = createSession(m[1]);
