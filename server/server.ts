@@ -51,6 +51,35 @@ function createSession(workspaceId: string) {
            agent_type: "claude", updated_at: new Date().toISOString() };
 }
 
+// Soft-delete: same as closing a chat tab on desktop (is_hidden=1). Messages stay
+// in the db; the session just drops out of both apps' lists.
+function hideSession(sessionId: string) {
+  const session = db.query(`SELECT id FROM sessions WHERE id = ?`).get(sessionId);
+  if (!session) return { error: "session not found", status: 404 };
+  const t = turns.get(sessionId);
+  t?.proc?.kill();
+  turns.delete(sessionId);
+  wdb.prepare(`UPDATE sessions SET is_hidden = 1 WHERE id = ?`).run(sessionId);
+  return { ok: true };
+}
+
+// Soft-archive: same as archiving a workspace on desktop (state='archived').
+// The worktree stays on disk; it just drops out of the active list.
+function archiveWorkspace(workspaceId: string) {
+  const ws = db.query(`SELECT id FROM workspaces WHERE id = ?`).get(workspaceId);
+  if (!ws) return { error: "workspace not found", status: 404 };
+  const sessionIds = db
+    .query(`SELECT id FROM sessions WHERE workspace_id = ?`)
+    .all(workspaceId) as { id: string }[];
+  for (const { id } of sessionIds) {
+    const t = turns.get(id);
+    t?.proc?.kill();
+    turns.delete(id);
+  }
+  wdb.prepare(`UPDATE workspaces SET state = 'archived' WHERE id = ?`).run(workspaceId);
+  return { ok: true };
+}
+
 // New workspace from the phone: a real git worktree in Conductor's own layout
 // (~/conductor/workspaces/<repo>/<city>) plus a workspaces row, so the desktop
 // app picks it up like any other. Undocumented schema — fails loud if it drifts.
@@ -372,6 +401,14 @@ Bun.serve({
         const t = turns.get(m[1]);
         t?.proc?.kill();
         return Response.json({ ok: true });
+      }
+      if (req.method === "DELETE" && (m = path.match(/^\/sessions\/([^/]+)$/))) {
+        const r = hideSession(m[1]);
+        return Response.json(r, { status: "status" in r ? (r.status as number) : 200 });
+      }
+      if (req.method === "DELETE" && (m = path.match(/^\/workspaces\/([^/]+)$/))) {
+        const r = archiveWorkspace(m[1]);
+        return Response.json(r, { status: "status" in r ? (r.status as number) : 200 });
       }
       // Serve workspace-relative attachment files (images pasted into chats live
       // under <workspace>/.context/attachments/).

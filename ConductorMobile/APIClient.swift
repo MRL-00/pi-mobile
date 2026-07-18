@@ -145,6 +145,17 @@ final class APIClient {
         return data
     }
 
+    private func delete(_ path: String) async throws {
+        guard let mac = activeMac, let url = URL(string: mac.baseURL + path) else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("Bearer \(mac.token)", forHTTPHeaderField: "Authorization")
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+    }
+
     func repos(on mac: MacServer) async throws -> [Repo] { try await get("/repos", on: mac) }
     func workspaces(repoId: String) async throws -> [Workspace] { try await get("/repos/\(repoId)/workspaces") }
     func sessions(workspaceId: String) async throws -> [ChatSession] { try await get("/workspaces/\(workspaceId)/sessions") }
@@ -160,6 +171,9 @@ final class APIClient {
     }
 
     func stop(sessionId: String) async throws { _ = try await post("/sessions/\(sessionId)/stop") }
+
+    func deleteSession(sessionId: String) async throws { try await delete("/sessions/\(sessionId)") }
+    func deleteWorkspace(workspaceId: String) async throws { try await delete("/workspaces/\(workspaceId)") }
 
     func createWorkspace(repoId: String) async throws -> Workspace {
         try decoder.decode(Workspace.self, from: try await post("/repos/\(repoId)/workspaces"))

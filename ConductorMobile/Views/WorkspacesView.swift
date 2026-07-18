@@ -11,20 +11,31 @@ struct WorkspacesView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            ScrollView {
-                if loaded && workspaces.isEmpty {
-                    emptyState
-                } else {
-                    LazyVStack(spacing: 0) {
-                        ForEach(workspaces) { ws in
-                            NavigationLink(value: ws) { WorkspaceRow(ws: ws) }
-                            Divider().overlay(Color.white.opacity(0.05))
-                        }
+            if loaded && workspaces.isEmpty {
+                emptyState
+                Spacer()
+            } else {
+                List {
+                    ForEach(workspaces) { ws in
+                        NavigationLink(value: ws) { WorkspaceRow(ws: ws) }
+                            .navigationLinkIndicatorVisibility(.hidden)
+                            .listRowInsets(EdgeInsets())
+                            .listRowBackground(Theme.bg)
+                            .listRowSeparatorTint(Color.white.opacity(0.05))
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    Task { await archiveWorkspace(ws) }
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
                     }
-                    .padding(.top, 8)
                 }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .padding(.top, 8)
+                .refreshable { await load() }
             }
-            .refreshable { await load() }
         }
         .background(Theme.bg)
         .navigationBarTitleDisplayMode(.inline)
@@ -89,6 +100,17 @@ struct WorkspacesView: View {
         if let ws = try? await api.createWorkspace(repoId: repo.id) {
             workspaces.insert(ws, at: 0)
             newWorkspace = ws
+        }
+    }
+
+    private func archiveWorkspace(_ ws: Workspace) async {
+        do {
+            try await api.deleteWorkspace(workspaceId: ws.id)
+        } catch {
+            return
+        }
+        withAnimation {
+            workspaces.removeAll { $0.id == ws.id }
         }
     }
 

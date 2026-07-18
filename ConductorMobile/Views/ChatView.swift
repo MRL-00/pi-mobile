@@ -23,10 +23,11 @@ struct ChatView: View {
                 .padding(16)
             }
             .defaultScrollAnchor(.bottom)
+            .refreshable { await load() }
             VStack(spacing: 9) {
                 // Tabs live above the composer — iOS 26's nav-bar backdrop covers
                 // anything anchored to the top edge in pushed views.
-                if !sessions.isEmpty { tabBar }
+                tabBar
                 if running { streamingBar }
                 composer
             }
@@ -73,10 +74,10 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showDiff) { DiffView(workspace: workspace) }
         .task { await load() }
-        .refreshable { await load() }
     }
 
     // Chat tabs, like the desktop's per-workspace tabs. "+" starts a new (Claude) chat.
+    // Long-press a tab → Delete hides it (Conductor's is_hidden), same as closing on desktop.
     private var tabBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -88,6 +89,13 @@ struct ChatView: View {
                             .foregroundStyle(s.id == sessionId ? Theme.text : Theme.textTertiary)
                             .padding(.horizontal, 12).padding(.vertical, 6)
                             .background(s.id == sessionId ? Color.white.opacity(0.09) : Color.white.opacity(0.03), in: Capsule())
+                    }
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            Task { await deleteSession(s) }
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
                     }
                 }
                 Button {
@@ -107,6 +115,10 @@ struct ChatView: View {
             }
             .padding(.horizontal, 4)
         }
+        // Horizontal ScrollView still rubber-bands vertically by default; lock it down.
+        .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+        .fixedSize(horizontal: false, vertical: true)
+        .background { HorizontalScrollLock() }
     }
 
     private func select(_ s: ChatSession) {
@@ -121,6 +133,27 @@ struct ChatView: View {
                 running = true
                 activity = status.activity
                 await poll()
+            }
+        }
+    }
+
+    private func deleteSession(_ s: ChatSession) async {
+        do {
+            try await api.deleteSession(sessionId: s.id)
+        } catch {
+            return
+        }
+        let wasSelected = s.id == sessionId
+        sessions.removeAll { $0.id == s.id }
+        if wasSelected {
+            running = false
+            activity = ""
+            messages = []
+            model = nil
+            if let next = sessions.first {
+                select(next)
+            } else {
+                session = nil
             }
         }
     }
@@ -404,6 +437,36 @@ extension View {
                 Label("Copy", systemImage: "doc.on.doc")
             }
         }
+    }
+}
+
+// Pins a horizontal SwiftUI ScrollView to the x-axis so vertical drags don't
+// rubber-band the tab strip (and so diagonal swipes don't feel "loose").
+private struct HorizontalScrollLock: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.isUserInteractionEnabled = false
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        DispatchQueue.main.async {
+            guard let scroll = Self.findScrollView(from: uiView) else { return }
+            scroll.alwaysBounceVertical = false
+            scroll.bouncesVertically = false
+            scroll.isDirectionalLockEnabled = true
+            scroll.contentInsetAdjustmentBehavior = .never
+        }
+    }
+
+    private static func findScrollView(from view: UIView) -> UIScrollView? {
+        var parent = view.superview
+        while let p = parent {
+            if let scroll = p as? UIScrollView { return scroll }
+            if let scroll = p.subviews.compactMap({ $0 as? UIScrollView }).first { return scroll }
+            parent = p.superview
+        }
+        return nil
     }
 }
 
