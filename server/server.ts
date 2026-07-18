@@ -38,8 +38,9 @@ const claudeCliModel = (m: string) =>
   `claude-${m.replace(/-1m$/, "")}` + (m.endsWith("-1m") ? "[1m]" : "");
 
 function createSession(workspaceId: string) {
-  const ws = db.query(`SELECT id FROM workspaces WHERE id = ?`).get(workspaceId);
+  const ws: any = db.query(`SELECT id, state FROM workspaces WHERE id = ?`).get(workspaceId);
   if (!ws) return { error: "workspace not found", status: 404 };
+  if (ws.state === "archived") return { error: "workspace archived", status: 404 };
   const lastModel: any = db
     .query(`SELECT model FROM sessions WHERE agent_type IS NULL OR agent_type = 'claude' ORDER BY updated_at DESC LIMIT 1`)
     .get();
@@ -56,10 +57,11 @@ function createSession(workspaceId: string) {
 function hideSession(sessionId: string) {
   const session = db.query(`SELECT id FROM sessions WHERE id = ?`).get(sessionId);
   if (!session) return { error: "session not found", status: 404 };
+  // Persist first so a failed write doesn't leave the session stopped-but-visible.
+  wdb.prepare(`UPDATE sessions SET is_hidden = 1 WHERE id = ?`).run(sessionId);
   const t = turns.get(sessionId);
   t?.proc?.kill();
   turns.delete(sessionId);
-  wdb.prepare(`UPDATE sessions SET is_hidden = 1 WHERE id = ?`).run(sessionId);
   return { ok: true };
 }
 
@@ -68,6 +70,9 @@ function hideSession(sessionId: string) {
 function archiveWorkspace(workspaceId: string) {
   const ws = db.query(`SELECT id FROM workspaces WHERE id = ?`).get(workspaceId);
   if (!ws) return { error: "workspace not found", status: 404 };
+  // Persist first so a failed write doesn't leave agents killed while the
+  // workspace still looks active.
+  wdb.prepare(`UPDATE workspaces SET state = 'archived' WHERE id = ?`).run(workspaceId);
   const sessionIds = db
     .query(`SELECT id FROM sessions WHERE workspace_id = ?`)
     .all(workspaceId) as { id: string }[];
@@ -76,7 +81,6 @@ function archiveWorkspace(workspaceId: string) {
     t?.proc?.kill();
     turns.delete(id);
   }
-  wdb.prepare(`UPDATE workspaces SET state = 'archived' WHERE id = ?`).run(workspaceId);
   return { ok: true };
 }
 
@@ -129,9 +133,12 @@ function sendMessage(sessionId: string, text: string, model?: string) {
   if (existing?.running) return { error: "agent is already working", status: 409 };
 
   const session: any = db
-    .query(`SELECT s.*, w.workspace_path FROM sessions s JOIN workspaces w ON s.workspace_id = w.id WHERE s.id = ?`)
+    .query(`SELECT s.*, w.workspace_path, w.state AS workspace_state
+              FROM sessions s JOIN workspaces w ON s.workspace_id = w.id WHERE s.id = ?`)
     .get(sessionId);
   if (!session) return { error: "session not found", status: 404 };
+  if (session.is_hidden) return { error: "session not found", status: 404 };
+  if (session.workspace_state === "archived") return { error: "workspace archived", status: 404 };
   // Picking a model from a different harness switches the session's agent and
   // starts a fresh thread for it — same behavior as the desktop picker.
   const agentForModel = (m: string) =>

@@ -115,10 +115,10 @@ struct ChatView: View {
             }
             .padding(.horizontal, 4)
         }
-        // Horizontal ScrollView still rubber-bands vertically by default; lock it down.
+        // Keep the strip from rubber-banding vertically; refresh lives on the
+        // messages ScrollView above, so this won't steal its bounce.
         .scrollBounceBehavior(.basedOnSize, axes: .vertical)
         .fixedSize(horizontal: false, vertical: true)
-        .background { HorizontalScrollLock() }
     }
 
     private func select(_ s: ChatSession) {
@@ -437,36 +437,6 @@ extension View {
                 Label("Copy", systemImage: "doc.on.doc")
             }
         }
-    }
-}
-
-// Pins a horizontal SwiftUI ScrollView to the x-axis so vertical drags don't
-// rubber-band the tab strip (and so diagonal swipes don't feel "loose").
-private struct HorizontalScrollLock: UIViewRepresentable {
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView()
-        view.isUserInteractionEnabled = false
-        return view
-    }
-
-    func updateUIView(_ uiView: UIView, context: Context) {
-        DispatchQueue.main.async {
-            guard let scroll = Self.findScrollView(from: uiView) else { return }
-            scroll.alwaysBounceVertical = false
-            scroll.bouncesVertically = false
-            scroll.isDirectionalLockEnabled = true
-            scroll.contentInsetAdjustmentBehavior = .never
-        }
-    }
-
-    private static func findScrollView(from view: UIView) -> UIScrollView? {
-        var parent = view.superview
-        while let p = parent {
-            if let scroll = p as? UIScrollView { return scroll }
-            if let scroll = p.subviews.compactMap({ $0 as? UIScrollView }).first { return scroll }
-            parent = p.superview
-        }
-        return nil
     }
 }
 

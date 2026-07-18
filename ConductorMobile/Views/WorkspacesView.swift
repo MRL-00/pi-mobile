@@ -12,8 +12,10 @@ struct WorkspacesView: View {
         VStack(spacing: 0) {
             header
             if loaded && workspaces.isEmpty {
-                emptyState
-                Spacer()
+                ScrollView {
+                    emptyState
+                }
+                .refreshable { await load() }
             } else {
                 List {
                     ForEach(workspaces) { ws in
