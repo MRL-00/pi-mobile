@@ -2,7 +2,7 @@
 // Run: bun run server.ts   (prints the auth token to give the phone app)
 import { Database } from "bun:sqlite";
 import { homedir } from "os";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from "fs";
 import { resolve } from "path";
 
 const DB_PATH = `${homedir()}/Library/Application Support/com.conductor.app/conductor.db`;
@@ -32,6 +32,84 @@ const insertMsg = wdb.prepare(
 );
 const updateClaudeSessionId = wdb.prepare(`UPDATE sessions SET claude_session_id = ? WHERE id = ?`);
 const updateSessionModel = wdb.prepare(`UPDATE sessions SET model = ? WHERE id = ?`);
+
+// ── Model picker groups ─────────────────────────────────────────────────────
+// The phone's picker fetches GET /models instead of hardcoding ids. The list is
+// scraped from the desktop app's own bundle (string-scanning its JS for model
+// ids), so new models reach the phone as soon as Conductor updates — no app
+// release needed. Best-effort over undocumented internals: any harness that
+// yields nothing plausible falls back to the static list below.
+const FALLBACK_GROUPS = [
+  { title: "Claude Code", models: ["fable-5", "opus-4-8-1m", "opus-4-7-1m", "opus-4-6-1m",
+                                   "sonnet-5-1m", "sonnet-4-6-1m", "sonnet-4-6", "haiku-4-5"] },
+  { title: "Codex", models: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"] },
+  { title: "Cursor", models: ["auto", "composer-2.5", "grok-4.5"] },
+  { title: "OpenCode", models: ["opencode:openrouter/moonshotai/kimi-k2.7-code", "opencode:openrouter/z-ai/glm-5.2"] },
+];
+
+const APP_BUNDLES = ["/Applications/Conductor.app", `${homedir()}/Applications/Conductor.app`];
+// Conductor picker ids as string literals in the bundle. A leading "claude-"
+// means it's a CLI id ("claude-opus-4-8[1m]"), not a picker id — skipped.
+const MODEL_RE = /(claude-)?\b(?:(?:fable|opus|sonnet|haiku|composer|grok|gpt)-\d(?:[\w.-]*\w)?|opencode:[\w./-]+)/g;
+
+const groupForModel = (id: string) =>
+  id.startsWith("gpt-") ? "Codex"
+  : id.startsWith("opencode:") ? "OpenCode"
+  : id.startsWith("composer") || id.startsWith("grok") ? "Cursor"
+  : "Claude Code";
+
+// The bundle mentions model-ish strings all over (deps, changelogs); the file
+// that defines the picker is the one mentioning ids from the most harnesses.
+// Scan every candidate file and keep the best-scoring file's ids, in the order
+// they appear there (≈ picker order).
+function scanBundleModels(): Map<string, string[]> | null {
+  const files: string[] = [];
+  for (const app of APP_BUNDLES) {
+    for (const dir of [`${app}/Contents/Resources`, `${app}/Contents/MacOS`]) {
+      try {
+        for (const name of readdirSync(dir, { recursive: true }) as string[]) {
+          if (!/\.(js|mjs|cjs|asar|html|json)$/.test(name) && name.includes(".")) continue;
+          const full = `${dir}/${name}`;
+          try {
+            const st = statSync(full);
+            if (st.isFile() && st.size < 256 * 1024 * 1024) files.push(full);
+          } catch {}
+        }
+      } catch {}
+    }
+  }
+  let best: Map<string, string[]> | null = null;
+  let bestScore = 0;
+  for (const file of files) {
+    let text: string;
+    try { text = readFileSync(file, "latin1"); } catch { continue; }
+    const byGroup = new Map<string, string[]>();
+    for (const m of text.matchAll(MODEL_RE)) {
+      if (m[1]) continue;
+      const list = byGroup.get(groupForModel(m[0])) ?? [];
+      if (!list.includes(m[0])) list.push(m[0]);
+      byGroup.set(groupForModel(m[0]), list);
+    }
+    const ids = [...byGroup.values()].reduce((n, l) => n + l.length, 0);
+    const score = byGroup.size * 100 + ids; // harness coverage first, then id count
+    if (score > bestScore) { bestScore = score; best = byGroup; }
+  }
+  return best;
+}
+
+let modelCache: { at: number; groups: typeof FALLBACK_GROUPS } | null = null;
+function modelGroups() {
+  if (modelCache && Date.now() - modelCache.at < 10 * 60_000) return modelCache.groups;
+  const scanned = scanBundleModels();
+  const groups = FALLBACK_GROUPS.map(({ title, models }) => {
+    let found = scanned?.get(title) ?? [];
+    // "auto" is a real Cursor picker entry but too generic a string to scan for.
+    if (title === "Cursor" && found.length && !found.includes("auto")) found = ["auto", ...found];
+    return { title, models: found.length ? found.slice(0, 16) : models };
+  });
+  modelCache = { at: Date.now(), groups };
+  return groups;
+}
 
 // Conductor model id ("opus-4-8-1m") → claude CLI id ("claude-opus-4-8[1m]")
 const claudeCliModel = (m: string) =>
@@ -417,6 +495,7 @@ Bun.serve({
         const t = turns.get(m[1]);
         return Response.json({ running: !!t?.running, activity: t?.activity ?? "" });
       }
+      if (path === "/models") return Response.json(modelGroups());
       if (path === "/repos") return Response.json(repos());
       if ((m = path.match(/^\/repos\/([^/]+)\/workspaces$/))) return Response.json(workspaces(m[1]));
       if ((m = path.match(/^\/workspaces\/([^/]+)\/sessions$/))) return Response.json(sessions(m[1]));

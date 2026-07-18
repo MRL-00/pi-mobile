@@ -35,15 +35,23 @@ struct ChatSession: Identifiable, Codable, Hashable {
     var modelLabel: String { prettyModel(model) }
 }
 
-// All model groups, as Conductor model ids (matching the desktop picker).
-// Picking a model from a different harness switches the chat's agent, like the desktop.
+// One picker section, as Conductor model ids. Picking a model from a different
+// harness switches the chat's agent, like the desktop.
+struct ModelGroup: Codable, Hashable {
+    let title: String
+    let models: [String]
+}
+
+// The live groups come from the server's /models (scraped from the desktop
+// app's bundle). This static list is only the fallback for older servers or
+// before the fetch lands.
 enum HarnessModels {
-    static let groups: [(title: String, models: [String])] = [
-        ("Claude Code", ["fable-5", "opus-4-8-1m", "opus-4-7-1m", "opus-4-6-1m",
-                         "sonnet-5-1m", "sonnet-4-6-1m", "sonnet-4-6", "haiku-4-5"]),
-        ("Codex", ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"]),
-        ("Cursor", ["auto", "composer-2.5", "grok-4.5"]),
-        ("OpenCode", ["opencode:openrouter/moonshotai/kimi-k2.7-code", "opencode:openrouter/z-ai/glm-5.2"]),
+    static let fallback: [ModelGroup] = [
+        ModelGroup(title: "Claude Code", models: ["fable-5", "opus-4-8-1m", "opus-4-7-1m", "opus-4-6-1m",
+                                                  "sonnet-5-1m", "sonnet-4-6-1m", "sonnet-4-6", "haiku-4-5"]),
+        ModelGroup(title: "Codex", models: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"]),
+        ModelGroup(title: "Cursor", models: ["auto", "composer-2.5", "grok-4.5"]),
+        ModelGroup(title: "OpenCode", models: ["opencode:openrouter/moonshotai/kimi-k2.7-code", "opencode:openrouter/z-ai/glm-5.2"]),
     ]
 }
 
