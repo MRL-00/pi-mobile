@@ -73,6 +73,7 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showDiff) { DiffView(workspace: workspace) }
         .task { await load() }
+        .task { await api.loadModelGroups() }
         .refreshable { await load() }
     }
 
@@ -157,7 +158,7 @@ struct ChatView: View {
 
     private var modelPill: some View {
         Menu {
-            ForEach(HarnessModels.groups, id: \.title) { group in
+            ForEach(api.modelGroups ?? HarnessModels.fallback, id: \.title) { group in
                 Section(group.title) {
                     Picker(group.title, selection: $model) {
                         ForEach(group.models, id: \.self) { m in
