@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/conductor-mobile-icon.png" width="160" alt="Conductor Mobile app icon">
+</p>
+
 # Conductor Mobile
 
 An unofficial iOS companion app for [Conductor](https://www.conductor.build/) — browse your projects, workspaces, and chat history from your phone, and keep talking to your agents while away from your Mac.
@@ -5,6 +9,19 @@ An unofficial iOS companion app for [Conductor](https://www.conductor.build/) �
 Conductor doesn't have a mobile app, so this one works by pairing a small companion server on your Mac (which reads Conductor's local SQLite database and drives the agent CLIs directly) with a native SwiftUI app on the phone.
 
 <p align="center"><em>Start a task on your laptop → go for a walk → keep directing the agent from your phone → come back and continue on the desktop.</em></p>
+
+## Screenshots
+
+<p align="center">
+  <a href="docs/images/projects.png"><img src="docs/images/projects.png" width="31%" alt="Browse your Conductor projects and workspaces"></a>
+  <a href="docs/images/chat.png"><img src="docs/images/chat.png" width="31%" alt="Chat with an agent from your phone"></a>
+  <a href="docs/images/realtime.png"><img src="docs/images/realtime.png" width="31%" alt="Watch agent work arrive in real time"></a>
+</p>
+
+<p align="center">
+  <a href="docs/images/diffs.png"><img src="docs/images/diffs.png" width="31%" alt="Review workspace diffs on your phone"></a>
+  <a href="docs/images/macs.png"><img src="docs/images/macs.png" width="31%" alt="Switch between connected Macs"></a>
+</p>
 
 ## Features
 
