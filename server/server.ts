@@ -97,12 +97,29 @@ function scanBundleModels(): Map<string, string[]> | null {
   return best;
 }
 
+// User-configured OpenCode models: providers declared in ~/.config/opencode/
+// opencode.json plus any opencode:* ids already used in past Conductor sessions
+// (covers dynamic providers like openrouter whose models aren't in the config).
+function opencodeModels(): string[] {
+  const ids: string[] = [];
+  try {
+    const cfg = JSON.parse(readFileSync(`${homedir()}/.config/opencode/opencode.json`, "utf8"));
+    for (const [prov, p] of Object.entries<any>(cfg.provider ?? {}))
+      for (const model of Object.keys(p?.models ?? {})) ids.push(`opencode:${prov}/${model}`);
+  } catch {}
+  try {
+    for (const r of db.prepare(`SELECT DISTINCT model FROM sessions WHERE model LIKE 'opencode:%'`).all() as { model: string }[])
+      if (!ids.includes(r.model)) ids.push(r.model);
+  } catch {}
+  return ids;
+}
+
 let modelCache: { at: number; groups: typeof FALLBACK_GROUPS } | null = null;
 function modelGroups() {
   if (modelCache && Date.now() - modelCache.at < 10 * 60_000) return modelCache.groups;
   const scanned = scanBundleModels();
   const groups = FALLBACK_GROUPS.map(({ title, models }) => {
-    let found = scanned?.get(title) ?? [];
+    let found = title === "OpenCode" ? opencodeModels() : scanned?.get(title) ?? [];
     // "auto" is a real Cursor picker entry but too generic a string to scan for.
     if (title === "Cursor" && found.length && !found.includes("auto")) found = ["auto", ...found];
     return { title, models: found.length ? found.slice(0, 16) : models };
