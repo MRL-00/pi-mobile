@@ -59,9 +59,10 @@ const groupForModel = (id: string) =>
   : "Claude Code";
 
 // The bundle mentions model-ish strings all over (deps, changelogs); the file
-// that defines the picker is the one mentioning ids from the most harnesses.
-// Scan every candidate file and keep the best-scoring file's ids, in the order
-// they appear there (≈ picker order).
+// that defines a harness's picker is the one mentioning ids from the most
+// harnesses. Per group, keep the ids from the best-scoring file that has any
+// for that group (harness definitions may be split across bundle chunks), in
+// the order they appear there (≈ picker order).
 function scanBundleModels(): Map<string, string[]> | null {
   const files: string[] = [];
   for (const app of APP_BUNDLES) {
@@ -78,8 +79,8 @@ function scanBundleModels(): Map<string, string[]> | null {
       } catch {}
     }
   }
-  let best: Map<string, string[]> | null = null;
-  let bestScore = 0;
+  const best = new Map<string, string[]>();
+  const bestScore = new Map<string, number>();
   for (const file of files) {
     let text: string;
     try { text = readFileSync(file, "latin1"); } catch { continue; }
@@ -92,9 +93,11 @@ function scanBundleModels(): Map<string, string[]> | null {
     }
     const ids = [...byGroup.values()].reduce((n, l) => n + l.length, 0);
     const score = byGroup.size * 100 + ids; // harness coverage first, then id count
-    if (score > bestScore) { bestScore = score; best = byGroup; }
+    for (const [group, list] of byGroup) {
+      if (score > (bestScore.get(group) ?? 0)) { bestScore.set(group, score); best.set(group, list); }
+    }
   }
-  return best;
+  return best.size ? best : null;
 }
 
 // User-configured OpenCode models: providers declared in ~/.config/opencode/
@@ -114,18 +117,21 @@ function opencodeModels(): string[] {
   return ids;
 }
 
-let modelCache: { at: number; groups: typeof FALLBACK_GROUPS } | null = null;
+// The bundle scan reads big files synchronously, so it runs at startup and on
+// a 10-minute timer — never on the request path. /models only assembles from
+// the cached scan (opencodeModels is a cheap config read + indexed query).
+let scannedGroups: Map<string, string[]> | null = null;
+const refreshScan = () => { try { scannedGroups = scanBundleModels(); } catch {} };
+refreshScan();
+setInterval(refreshScan, 10 * 60_000);
+
 function modelGroups() {
-  if (modelCache && Date.now() - modelCache.at < 10 * 60_000) return modelCache.groups;
-  const scanned = scanBundleModels();
-  const groups = FALLBACK_GROUPS.map(({ title, models }) => {
-    let found = title === "OpenCode" ? opencodeModels() : scanned?.get(title) ?? [];
+  return FALLBACK_GROUPS.map(({ title, models }) => {
+    let found = title === "OpenCode" ? opencodeModels() : scannedGroups?.get(title) ?? [];
     // "auto" is a real Cursor picker entry but too generic a string to scan for.
     if (title === "Cursor" && found.length && !found.includes("auto")) found = ["auto", ...found];
-    return { title, models: found.length ? found.slice(0, 16) : models };
+    return { title, models: found.length ? found : models };
   });
-  modelCache = { at: Date.now(), groups };
-  return groups;
 }
 
 // Conductor model id ("opus-4-8-1m") → claude CLI id ("claude-opus-4-8[1m]")

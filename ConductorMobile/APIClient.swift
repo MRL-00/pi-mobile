@@ -71,9 +71,12 @@ final class APIClient {
     }
     // The Mac owning whatever repo the user is currently inside. Navigation is a
     // single flow, so one active Mac at a time is enough.
-    var activeMac: MacServer?
+    var activeMac: MacServer? {
+        didSet { if oldValue?.id != activeMac?.id { modelGroups = nil } }
+    }
     // Picker groups from the active Mac's /models; nil until fetched (views fall
-    // back to HarnessModels.fallback).
+    // back to HarnessModels.fallback). Cleared on Mac switch so one Mac's models
+    // never show for another.
     var modelGroups: [ModelGroup]?
 
     init() {
@@ -152,7 +155,9 @@ final class APIClient {
 
     func loadModelGroups() async {
         // Keep the last good list on failure (older server without /models, offline).
-        if let groups: [ModelGroup] = try? await get("/models"), !groups.isEmpty {
+        guard let mac = activeMac else { return }
+        if let groups: [ModelGroup] = try? await get("/models", on: mac), !groups.isEmpty,
+           activeMac?.id == mac.id {
             modelGroups = groups
         }
     }
