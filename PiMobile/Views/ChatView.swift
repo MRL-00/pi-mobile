@@ -39,7 +39,7 @@ struct ChatView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                VStack(spacing: 2) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(workspace.name)
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Theme.text)
@@ -163,7 +163,7 @@ struct ChatView: View {
         .padding(.horizontal, 4)
     }
 
-    private var canSend: Bool { !draft.trimmingCharacters(in: .whitespaces).isEmpty && !running && sessionId != nil }
+    private var canSend: Bool { !draft.trimmingCharacters(in: .whitespaces).isEmpty && !running }
 
     private var composerPlaceholder: String {
         running ? "Agent is working…" : "Message \(workspace.branch ?? workspace.name)"
@@ -199,7 +199,8 @@ struct ChatView: View {
     private var composer: some View {
         HStack(spacing: 6) {
             modelPill
-            TextField(composerPlaceholder, text: $draft)
+            TextField(composerPlaceholder, text: $draft, axis: .vertical)
+                .lineLimit(1...5)
                 .font(.system(size: 14.5))
                 .foregroundStyle(Theme.text)
                 .padding(.horizontal, 8)
@@ -219,12 +220,24 @@ struct ChatView: View {
     }
 
     private func send() {
-        guard canSend, let sessionId else { return }
+        guard canSend else { return }
         let text = draft.trimmingCharacters(in: .whitespaces)
         draft = ""
         running = true
         Task {
-            try? await api.send(sessionId: sessionId, text: text, model: model)
+            // A workspace with no chats yet has no session — create one on first send.
+            var sid = sessionId
+            if sid == nil, let s = try? await api.createSession(workspaceId: workspace.id) {
+                sessions.insert(s, at: 0)
+                session = s
+                sid = s.id
+            }
+            guard let sid else {
+                running = false
+                draft = text
+                return
+            }
+            try? await api.send(sessionId: sid, text: text, model: model)
             await refresh()
             await poll()
         }
