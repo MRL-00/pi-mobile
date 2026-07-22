@@ -74,6 +74,16 @@ struct SettingsView: View {
                 Section {
                     Link("Pi Mobile on GitHub", destination: URL(string: "https://github.com/MRL-00/pi-mobile")!)
                         .foregroundStyle(.secondary)
+
+                    DisclosureGroup("Changelog") {
+                        changelogEntry("0.2.0 (10)", "The app is now Pi Companion: works with the Pi coding agent (pi.dev) — browse Pi sessions, send messages, switch between 15+ providers' models, add projects with a folder browser, and delete chats and workspaces.")
+                        changelogEntry("0.1.0 (8)", "Model choices now come from Conductor on your Mac, including your configured OpenCode models.")
+                        changelogEntry("0.1.0 (7)", "Moved the new-workspace button into the navigation bar.")
+                        changelogEntry("0.1.0 (6)", "Added workspace creation from your iPhone.")
+                        changelogEntry("0.1.0 (5)", "Added Tailscale and private-network support, plus the privacy policy.")
+                        changelogEntry("0.1.0 (3)", "Added QR pairing and in-app Mac setup instructions.")
+                        changelogEntry("0.1.0 (1)", "Initial release with agent chats, model switching, git diffs, image viewing, and support for multiple Macs.")
+                    }
                 }
             }
             .navigationTitle("Settings")
@@ -95,6 +105,17 @@ struct SettingsView: View {
             Text(text)
                 .font(.subheadline)
         }
+    }
+
+    private func changelogEntry(_ version: String, _ details: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(version)
+                .font(.subheadline.bold())
+            Text(details)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
     }
 
     private func checkStatuses() async {
