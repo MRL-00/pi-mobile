@@ -41,7 +41,7 @@ struct SettingsView: View {
 
                 Section("Set up a Mac") {
                     VStack(alignment: .leading, spacing: 12) {
-                        setupStep(1, "Install [Conductor](https://www.conductor.build) and [Bun](https://bun.sh) on your Mac, and run at least one agent session in it.")
+                        setupStep(1, "Install [Pi](https://pi.dev) and [Bun](https://bun.sh) on your Mac, and run at least one `pi` session in a project folder.")
                         setupStep(2, "In Terminal on the Mac, run:")
                         HStack {
                             Text(Self.installCommand)
@@ -72,10 +72,11 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Link("Conductor Mobile on GitHub", destination: URL(string: "https://github.com/MRL-00/conductor-mobile")!)
+                    Link("Pi Mobile on GitHub", destination: URL(string: "https://github.com/MRL-00/pi-mobile")!)
                         .foregroundStyle(.secondary)
 
                     DisclosureGroup("Changelog") {
+                        changelogEntry("0.2.0 (10)", "The app is now Pi Companion: works with the Pi coding agent (pi.dev) — browse Pi sessions, send messages, switch between 15+ providers' models, add projects with a folder browser, and delete chats and workspaces.")
                         changelogEntry("0.1.0 (8)", "Model choices now come from Conductor on your Mac, including your configured OpenCode models.")
                         changelogEntry("0.1.0 (7)", "Moved the new-workspace button into the navigation bar.")
                         changelogEntry("0.1.0 (6)", "Added workspace creation from your iPhone.")
@@ -92,7 +93,7 @@ struct SettingsView: View {
         .tint(Theme.accent)
     }
 
-    static let installCommand = "curl -fsSL https://raw.githubusercontent.com/MRL-00/conductor-mobile/main/server/install.sh | bash"
+    static let installCommand = "curl -fsSL https://raw.githubusercontent.com/MRL-00/pi-mobile/main/server/install.sh | bash"
 
     private func setupStep(_ n: Int, _ text: LocalizedStringKey) -> some View {
         HStack(alignment: .top, spacing: 10) {
@@ -146,7 +147,7 @@ struct MacEditView: View {
                     .autocorrectionDisabled()
             }
             Section {
-                Text("The token is printed when the companion server starts, and stored in ~/.conductor-companion/token on that Mac.")
+                Text("The token is printed when the companion server starts, and stored in ~/.pi-companion/token on that Mac.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

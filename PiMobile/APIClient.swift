@@ -38,7 +38,7 @@ struct MacServer: Codable, Identifiable, Hashable {
 enum TokenStore {
     private static func query(_ id: UUID) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: "conductor-mobile.mac-token",
+         kSecAttrService as String: "pi-mobile.mac-token",
          kSecAttrAccount as String: id.uuidString]
     }
 
@@ -176,6 +176,32 @@ final class APIClient {
     }
 
     func stop(sessionId: String) async throws { _ = try await post("/sessions/\(sessionId)/stop") }
+
+    private func delete(_ path: String) async throws {
+        guard let mac = activeMac, let url = URL(string: mac.baseURL + path) else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("Bearer \(mac.token)", forHTTPHeaderField: "Authorization")
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+    }
+
+    func deleteSession(_ id: String) async throws { try await delete("/sessions/\(id)") }
+    func deleteWorkspace(_ id: String) async throws { try await delete("/workspaces/\(id)") }
+
+    func addProject(path: String) async throws {
+        _ = try await post("/projects", body: ["path": path])
+    }
+
+    func browse(path: String?) async throws -> FolderListing {
+        var p = "/browse"
+        if let path, let enc = path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+            p += "?path=\(enc)"
+        }
+        return try await get(p)
+    }
 
     func createWorkspace(repoId: String) async throws -> Workspace {
         try decoder.decode(Workspace.self, from: try await post("/repos/\(repoId)/workspaces"))

@@ -14,10 +14,10 @@
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>com.matt-nz.conductormobile.pair</string>
+			<string>com.matt-nz.pimobile.pair</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>conductor-companion</string>
+				<string>pi-companion</string>
 			</array>
 		</dict>
 	</array>
