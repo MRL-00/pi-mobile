@@ -18,6 +18,14 @@ struct WorkspacesView: View {
                     LazyVStack(spacing: 0) {
                         ForEach(workspaces) { ws in
                             NavigationLink(value: ws) { WorkspaceRow(ws: ws) }
+                                .contextMenu {
+                                    Button("Remove from app", systemImage: "trash", role: .destructive) {
+                                        Task {
+                                            try? await api.deleteWorkspace(ws.id)
+                                            workspaces.removeAll { $0.id == ws.id }
+                                        }
+                                    }
+                                }
                             Divider().overlay(Color.white.opacity(0.05))
                         }
                     }
@@ -73,7 +81,7 @@ struct WorkspacesView: View {
             Text("No active workspaces")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(Color(red: 0.63, green: 0.63, blue: 0.67))
-            Text("Start an agent from Conductor on your Mac and it will show up here.")
+            Text("Run `pi` in a project folder on your Mac and it will show up here.")
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.textMuted)
                 .multilineTextAlignment(.center)

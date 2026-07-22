@@ -41,7 +41,7 @@ struct SettingsView: View {
 
                 Section("Set up a Mac") {
                     VStack(alignment: .leading, spacing: 12) {
-                        setupStep(1, "Install [Conductor](https://www.conductor.build) and [Bun](https://bun.sh) on your Mac, and run at least one agent session in it.")
+                        setupStep(1, "Install [Pi](https://pi.dev) and [Bun](https://bun.sh) on your Mac, and run at least one `pi` session in a project folder.")
                         setupStep(2, "In Terminal on the Mac, run:")
                         HStack {
                             Text(Self.installCommand)
@@ -72,7 +72,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Link("Conductor Mobile on GitHub", destination: URL(string: "https://github.com/MRL-00/conductor-mobile")!)
+                    Link("Pi Mobile on GitHub", destination: URL(string: "https://github.com/MRL-00/pi-mobile")!)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -83,7 +83,7 @@ struct SettingsView: View {
         .tint(Theme.accent)
     }
 
-    static let installCommand = "curl -fsSL https://raw.githubusercontent.com/MRL-00/conductor-mobile/main/server/install.sh | bash"
+    static let installCommand = "curl -fsSL https://raw.githubusercontent.com/MRL-00/pi-mobile/main/server/install.sh | bash"
 
     private func setupStep(_ n: Int, _ text: LocalizedStringKey) -> some View {
         HStack(alignment: .top, spacing: 10) {
@@ -126,7 +126,7 @@ struct MacEditView: View {
                     .autocorrectionDisabled()
             }
             Section {
-                Text("The token is printed when the companion server starts, and stored in ~/.conductor-companion/token on that Mac.")
+                Text("The token is printed when the companion server starts, and stored in ~/.pi-companion/token on that Mac.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

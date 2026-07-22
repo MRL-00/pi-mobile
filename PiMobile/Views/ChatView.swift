@@ -12,7 +12,7 @@ struct ChatView: View {
     private var sessionId: String? { session?.id }
     @State private var running = false
     @State private var activity = ""
-    @State private var model: String?   // Conductor model id; nil = session default
+    @State private var model: String?   // Pi "provider/model" id; nil = session default
 
     var body: some View {
         VStack(spacing: 0) {
@@ -90,6 +90,19 @@ struct ChatView: View {
                             .padding(.horizontal, 12).padding(.vertical, 6)
                             .background(s.id == sessionId ? Color.white.opacity(0.09) : Color.white.opacity(0.03), in: Capsule())
                     }
+                    .contextMenu {
+                        Button("Delete Chat", systemImage: "trash", role: .destructive) {
+                            Task {
+                                try? await api.deleteSession(s.id)
+                                sessions.removeAll { $0.id == s.id }
+                                if s.id == sessionId {
+                                    session = nil
+                                    messages = []
+                                    if let next = sessions.first { select(next) }
+                                }
+                            }
+                        }
+                    }
                 }
                 Button {
                     Task {
@@ -158,8 +171,10 @@ struct ChatView: View {
 
     private var modelPill: some View {
         Menu {
+            // One submenu per provider — Menu drops Section titles on iOS 26,
+            // and providers like openrouter have hundreds of models.
             ForEach(api.modelGroups ?? HarnessModels.fallback, id: \.title) { group in
-                Section(group.title) {
+                Menu(group.title) {
                     Picker(group.title, selection: $model) {
                         ForEach(group.models, id: \.self) { m in
                             Text(prettyModel(m)).tag(String?.some(m))
@@ -249,7 +264,7 @@ struct ChatView: View {
     }
 }
 
-// Conductor embeds pasted files in message text as "@⟦name⟧(url-encoded-relative-path)".
+// Desktop-pasted files may appear in message text as "@⟦name⟧(url-encoded-relative-path)".
 struct Attachment: Identifiable {
     let name: String
     let path: String

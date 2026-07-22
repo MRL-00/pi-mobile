@@ -4,3 +4,4 @@ DerivedData/
 *.xcuserstate
 node_modules/
 .clawpatch/
+build/

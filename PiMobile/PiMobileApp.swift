@@ -21,7 +21,7 @@ struct DebugChatPush: View {
 #endif
 
 @main
-struct ConductorMobileApp: App {
+struct PiMobileApp: App {
     @State private var api = APIClient()
 
     var body: some Scene {
@@ -42,9 +42,9 @@ struct ConductorMobileApp: App {
             }
             .environment(api)
             .preferredColorScheme(.dark)
-            // conductor-companion://pair?name=…&addr=…&token=… (QR printed by the server)
+            // pi-companion://pair?name=…&addr=…&token=… (QR printed by the server)
             .onOpenURL { url in
-                guard url.scheme == "conductor-companion", url.host() == "pair",
+                guard url.scheme == "pi-companion", url.host() == "pair",
                       let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
                       let addr = items.first(where: { $0.name == "addr" })?.value,
                       let token = items.first(where: { $0.name == "token" })?.value else { return }

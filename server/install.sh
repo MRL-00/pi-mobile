@@ -1,12 +1,12 @@
 #!/bin/bash
-# Install the Conductor companion server as a login LaunchAgent (auto-restart, survives reboots).
+# Install the Pi companion server as a login LaunchAgent (auto-restart, survives reboots).
 # Usage: ./install.sh        Uninstall: ./install.sh --uninstall
 set -euo pipefail
 
-LABEL="co.bungy.conductor-companion"
+LABEL="co.bungy.pi-companion"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DIR="$(cd "$(dirname "$0")" && pwd)"
-LOG_DIR="$HOME/.conductor-companion"
+LOG_DIR="$HOME/.pi-companion"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
   launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
@@ -24,7 +24,7 @@ mkdir -p "$LOG_DIR" "$HOME/Library/LaunchAgents"
 if [[ ! -f "$DIR/server.ts" ]]; then
   DIR="$LOG_DIR"
   echo "Downloading server.ts…"
-  curl -fsSL "https://raw.githubusercontent.com/MRL-00/conductor-mobile/main/server/server.ts" -o "$DIR/server.ts"
+  curl -fsSL "https://raw.githubusercontent.com/MRL-00/pi-mobile/main/server/server.ts" -o "$DIR/server.ts"
 fi
 
 # caffeinate -s keeps the Mac awake (on AC power) so agents can run while you're away

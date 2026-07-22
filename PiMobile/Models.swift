@@ -1,6 +1,6 @@
 import Foundation
 
-// Shapes mirror the companion server's JSON API, which mirrors conductor.db.
+// Shapes mirror the companion server's JSON API over Pi's session files.
 
 struct Repo: Identifiable, Codable, Hashable {
     let id: String
@@ -31,27 +31,23 @@ struct ChatSession: Identifiable, Codable, Hashable {
     let agentType: String?
     let updatedAt: Date
 
-    var isClaude: Bool { agentType == nil || agentType == "claude" }
     var modelLabel: String { prettyModel(model) }
 }
 
-// One picker section, as Conductor model ids. Picking a model from a different
-// harness switches the chat's agent, like the desktop.
+// One picker section per Pi provider; ids are "provider/model" and pass
+// straight through to `pi --model`.
 struct ModelGroup: Codable, Hashable {
     let title: String
     let models: [String]
 }
 
-// The live groups come from the server's /models (scraped from the desktop
-// app's bundle). This static list is only the fallback for older servers or
-// before the fetch lands.
+// The live groups come from the server's /models (Pi's own model catalog).
+// This static list is only the fallback before the fetch lands.
 enum HarnessModels {
     static let fallback: [ModelGroup] = [
-        ModelGroup(title: "Claude Code", models: ["fable-5", "opus-4-8-1m", "opus-4-7-1m", "opus-4-6-1m",
-                                                  "sonnet-5-1m", "sonnet-4-6-1m", "sonnet-4-6", "haiku-4-5"]),
-        ModelGroup(title: "Codex", models: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"]),
-        ModelGroup(title: "Cursor", models: ["auto", "composer-2.5", "grok-4.5"]),
-        ModelGroup(title: "OpenCode", models: ["opencode:openrouter/moonshotai/kimi-k2.7-code", "opencode:openrouter/z-ai/glm-5.2"]),
+        ModelGroup(title: "anthropic", models: ["anthropic/claude-fable-5", "anthropic/claude-opus-4-8",
+                                                "anthropic/claude-sonnet-5", "anthropic/claude-haiku-4-5"]),
+        ModelGroup(title: "openai-codex", models: ["openai-codex/gpt-5.6-sol", "openai-codex/gpt-5.5", "openai-codex/gpt-5.4"]),
     ]
 }
 
@@ -87,6 +83,12 @@ struct WorkspaceDiff: Codable {
     let base: String
     let stat: String
     let diff: String
+}
+
+struct FolderListing: Codable {
+    let path: String
+    let parent: String?
+    let dirs: [String]
 }
 
 struct AgentStatus: Codable {

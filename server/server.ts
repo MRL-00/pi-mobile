@@ -1,15 +1,16 @@
-// Conductor companion server: read-only JSON API over Conductor's local SQLite db.
+// Pi companion server: JSON API over Pi's session files (~/.pi/agent/sessions)
+// plus turn-running via `pi --mode rpc`. Everything it touches is documented
+// Pi surface (session JSONL v3, RPC protocol) — no undocumented internals.
 // Run: bun run server.ts   (prints the auth token to give the phone app)
-import { Database } from "bun:sqlite";
 import { homedir } from "os";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from "fs";
-import { resolve } from "path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, renameSync } from "fs";
+import { resolve, basename, dirname } from "path";
 
-const DB_PATH = `${homedir()}/Library/Application Support/com.conductor.app/conductor.db`;
-const PORT = 8940;
+const SESSIONS_ROOT = `${homedir()}/.pi/agent/sessions`;
+const PORT = Number(process.env.PORT ?? 8940);
 
 // Persistent bearer token — server can expose chat history, so auth is required.
-const tokenDir = `${homedir()}/.conductor-companion`;
+const tokenDir = `${homedir()}/.pi-companion`;
 const tokenPath = `${tokenDir}/token`;
 if (!existsSync(tokenPath)) {
   mkdirSync(tokenDir, { recursive: true });
@@ -17,340 +18,319 @@ if (!existsSync(tokenPath)) {
 }
 const TOKEN = readFileSync(tokenPath, "utf8").trim();
 
-const db = new Database(DB_PATH, { readonly: true });
+// Extra project cwds with no Pi sessions yet (e.g. fresh worktrees made from
+// the phone). Pi discovers projects implicitly by running in a folder; this
+// file covers the ones the phone created before their first session.
+const projectsPath = `${tokenDir}/projects.json`;
+// Entries are {path, added} (older versions stored bare path strings).
+const projectEntries = (): { path: string; added: number }[] => {
+  try {
+    return JSON.parse(readFileSync(projectsPath, "utf8")).map((e: any) =>
+      typeof e === "string" ? { path: e, added: 0 } : e);
+  } catch { return []; }
+};
+const extraCwds = () => projectEntries().map((e) => e.path);
+const addedAt = (cwd: string) => projectEntries().find((e) => e.path === cwd)?.added ?? 0;
+const rememberCwd = (cwd: string) => {
+  const list = projectEntries();
+  if (!list.some((e) => e.path === cwd))
+    writeFileSync(projectsPath, JSON.stringify([...list, { path: cwd, added: Date.now() }], null, 2));
+};
+const forgetCwd = (cwd: string) => {
+  writeFileSync(projectsPath, JSON.stringify(projectEntries().filter((e) => e.path !== cwd), null, 2));
+};
 
-// ── v2: sending messages ────────────────────────────────────────────────────
-// Turns sent from the phone resume the workspace's Claude Code session and are
-// written into Conductor's own session_messages in its native envelope format,
-// so the desktop app shows them (after a Conductor restart — it reads the db on
-// launch) and both apps stay on one conversation branch. Undocumented schema:
-// if a Conductor update changes it, these writes fail loud, not silent.
-const wdb = new Database(DB_PATH); // separate read-write connection; WAL handles concurrency
-const insertMsg = wdb.prepare(
-  `INSERT INTO session_messages (id, session_id, role, content, created_at, sent_at, model, turn_id, queue_order, sender_id, sdk_message_id)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
-);
-const updateClaudeSessionId = wdb.prepare(`UPDATE sessions SET claude_session_id = ? WHERE id = ?`);
-const updateSessionModel = wdb.prepare(`UPDATE sessions SET model = ? WHERE id = ?`);
+const git = (cwd: string, ...a: string[]) => {
+  const p = Bun.spawnSync(["git", ...a], { cwd, stdout: "pipe", stderr: "pipe" });
+  return p.exitCode === 0 ? p.stdout.toString().trim() : null;
+};
 
-// ── Model picker groups ─────────────────────────────────────────────────────
-// The phone's picker fetches GET /models instead of hardcoding ids. The list is
-// scraped from the desktop app's own bundle (string-scanning its JS for model
-// ids), so new models reach the phone as soon as Conductor updates — no app
-// release needed. Best-effort over undocumented internals: any harness that
-// yields nothing plausible falls back to the static list below.
-const FALLBACK_GROUPS = [
-  { title: "Claude Code", models: ["fable-5", "opus-4-8-1m", "opus-4-7-1m", "opus-4-6-1m",
-                                   "sonnet-5-1m", "sonnet-4-6-1m", "sonnet-4-6", "haiku-4-5"] },
-  { title: "Codex", models: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"] },
-  { title: "Cursor", models: ["auto", "composer-2.5", "grok-4.5"] },
-  { title: "OpenCode", models: ["opencode:openrouter/moonshotai/kimi-k2.7-code", "opencode:openrouter/z-ai/glm-5.2"] },
-];
+// ── Project/workspace scan ──────────────────────────────────────────────────
+// Pi groups sessions by cwd: one directory per project path under
+// SESSIONS_ROOT, named "--<cwd with / → ->--" (lossy — real cwd comes from the
+// header line inside each session file). We map onto the phone's existing
+// three-level navigation: repo = the git repo's main checkout, workspace = a
+// cwd inside that repo (main checkout or any worktree), session = a jsonl file.
+//
+// Projects are opt-in: only folders the user added from the phone (plus
+// worktrees created from the phone) appear — Pi's session dir also collects
+// runs from other tools built on Pi (emdash etc.) and scratch folders, which
+// would drown the list. Sessions for an added folder are picked up automatically.
+const encodeCwd = (cwd: string) => `-${cwd.replaceAll("/", "-")}--`;
 
-const APP_BUNDLES = ["/Applications/Conductor.app", `${homedir()}/Applications/Conductor.app`];
-// Conductor picker ids as string literals in the bundle. A leading "claude-"
-// means it's a CLI id ("claude-opus-4-8[1m]"), not a picker id — skipped.
-const MODEL_RE = /(claude-)?\b(?:(?:fable|opus|sonnet|haiku|composer|grok|gpt)-\d(?:[\w.-]*\w)?|opencode:[\w./-]+)/g;
+type Ws = { cwd: string; dir: string | null; mtime: number; sessionCount: number };
+type Scan = { workspaces: Map<string, Ws>; repoOf: Map<string, string>; repoRoots: Map<string, string> };
 
-const groupForModel = (id: string) =>
-  id.startsWith("gpt-") ? "Codex"
-  : id.startsWith("opencode:") ? "OpenCode"
-  : id.startsWith("composer") || id.startsWith("grok") ? "Cursor"
-  : "Claude Code";
+function scan(): Scan {
+  const workspaces = new Map<string, Ws>(); // workspace id (encoded cwd) → info
+  const repoOf = new Map<string, string>(); // workspace id → repo id
+  const repoRoots = new Map<string, string>(); // repo id → root path
+  const cwds = new Map<string, { dir: string | null; mtime: number; sessionCount: number }>();
 
-// The bundle mentions model-ish strings all over (deps, changelogs); the file
-// that defines a harness's picker is the one mentioning ids from the most
-// harnesses. Per group, keep the ids from the best-scoring file that has any
-// for that group (harness definitions may be split across bundle chunks), in
-// the order they appear there (≈ picker order).
-function scanBundleModels(): Map<string, string[]> | null {
-  const files: string[] = [];
-  for (const app of APP_BUNDLES) {
-    for (const dir of [`${app}/Contents/Resources`, `${app}/Contents/MacOS`]) {
+  const wanted = new Set(extraCwds().filter((c) => existsSync(c)));
+  let dirs: string[] = [];
+  try { dirs = readdirSync(SESSIONS_ROOT); } catch {}
+  for (const dir of dirs) {
+    const full = `${SESSIONS_ROOT}/${dir}`;
+    let files: string[];
+    try { files = readdirSync(full).filter((f) => f.endsWith(".jsonl")); } catch { continue; }
+    if (!files.length) continue;
+    files.sort();
+    const newest = files[files.length - 1];
+    let cwd: string;
+    try {
+      const header = JSON.parse(readFileSync(`${full}/${newest}`, "utf8").split("\n", 1)[0]);
+      cwd = header.cwd;
+    } catch { continue; }
+    if (!wanted.has(cwd)) continue; // not a folder the user added
+    cwds.set(cwd, { dir: full, mtime: statSync(`${full}/${newest}`).mtimeMs, sessionCount: files.length });
+  }
+  // No sessions yet → "last activity" is the moment the user added the folder.
+  for (const cwd of wanted)
+    if (!cwds.has(cwd)) cwds.set(cwd, { dir: null, mtime: addedAt(cwd) || Date.now(), sessionCount: 0 });
+
+  for (const [cwd, info] of cwds) {
+    // Group worktrees with their main checkout: --git-common-dir points at the
+    // primary .git for every worktree of a repo. Non-git folders stand alone.
+    const common = git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir");
+    const root = common ? dirname(common) : cwd;
+    const wsId = encodeCwd(cwd);
+    const repoId = encodeCwd(root);
+    workspaces.set(wsId, { cwd, ...info });
+    repoOf.set(wsId, repoId);
+    if (!repoRoots.has(repoId)) repoRoots.set(repoId, root);
+  }
+  return { workspaces, repoOf, repoRoots };
+}
+
+// Scan shells out to git per project, so cache briefly; phone navigation
+// re-fetches often. ponytail: 15s TTL, event-driven invalidation if it lags.
+let scanCache: { at: number; data: Scan } | null = null;
+const scanned = () => {
+  if (!scanCache || Date.now() - scanCache.at > 15_000) scanCache = { at: Date.now(), data: scan() };
+  return scanCache.data;
+};
+const wsById = (id: string) => scanned().workspaces.get(id);
+
+// ── Session files ───────────────────────────────────────────────────────────
+type Entry = any; // Pi session JSONL v3 entries
+const readEntries = (file: string): Entry[] =>
+  readFileSync(file, "utf8")
+    .split("\n")
+    .filter((l) => l.trim())
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter(Boolean);
+
+// Sessions form a tree via id/parentId; the live conversation is the path
+// from the last-written entry back to the root.
+function activeBranch(entries: Entry[]): Entry[] {
+  const byId = new Map(entries.filter((e) => e.id).map((e) => [e.id, e]));
+  const branch: Entry[] = [];
+  let cur = entries[entries.length - 1];
+  while (cur) {
+    branch.push(cur);
+    cur = cur.parentId ? byId.get(cur.parentId) : null;
+  }
+  return branch.reverse();
+}
+
+const sessionFiles = (dir: string) =>
+  readdirSync(dir).filter((f) => f.endsWith(".jsonl")).sort().reverse(); // newest first (timestamp prefix)
+
+const sessionIdOf = (file: string) => basename(file).replace(".jsonl", "").split("_")[1] ?? basename(file);
+
+// Find a session file by uuid across all project dirs.
+function findSessionFile(sessionId: string): { file: string; cwd: string } | null {
+  let dirs: string[] = [];
+  try { dirs = readdirSync(SESSIONS_ROOT); } catch {}
+  for (const dir of dirs) {
+    const full = `${SESSIONS_ROOT}/${dir}`;
+    let files: string[] = [];
+    try { files = readdirSync(full); } catch { continue; }
+    const hit = files.find((f) => f.endsWith(`_${sessionId}.jsonl`));
+    if (hit) {
       try {
-        for (const name of readdirSync(dir, { recursive: true }) as string[]) {
-          if (!/\.(js|mjs|cjs|asar|html|json)$/.test(name) && name.includes(".")) continue;
-          const full = `${dir}/${name}`;
-          try {
-            const st = statSync(full);
-            if (st.isFile() && st.size < 256 * 1024 * 1024) files.push(full);
-          } catch {}
-        }
+        const header = JSON.parse(readFileSync(`${full}/${hit}`, "utf8").split("\n", 1)[0]);
+        return { file: `${full}/${hit}`, cwd: header.cwd };
       } catch {}
     }
   }
-  const best = new Map<string, string[]>();
-  const bestScore = new Map<string, number>();
-  for (const file of files) {
-    let text: string;
-    try { text = readFileSync(file, "latin1"); } catch { continue; }
-    const byGroup = new Map<string, string[]>();
-    for (const m of text.matchAll(MODEL_RE)) {
-      if (m[1]) continue;
-      const list = byGroup.get(groupForModel(m[0])) ?? [];
-      if (!list.includes(m[0])) list.push(m[0]);
-      byGroup.set(groupForModel(m[0]), list);
+  return null;
+}
+
+const textOf = (msg: any) =>
+  (msg?.content ?? [])
+    .filter((b: any) => b.type === "text")
+    .map((b: any) => b.text)
+    .join("")
+    .trim();
+
+function sessionSummary(file: string, workspaceId: string) {
+  const entries = readEntries(file);
+  let title = "Untitled";
+  let model: string | null = null;
+  for (const e of entries) {
+    if (title === "Untitled" && e.type === "message" && e.message?.role === "user") {
+      const t = textOf(e.message);
+      if (t) title = t.slice(0, 80);
     }
-    const ids = [...byGroup.values()].reduce((n, l) => n + l.length, 0);
-    const score = byGroup.size * 100 + ids; // harness coverage first, then id count
-    for (const [group, list] of byGroup) {
-      if (score > (bestScore.get(group) ?? 0)) { bestScore.set(group, score); best.set(group, list); }
-    }
+    if (e.type === "model_change") model = `${e.provider}/${e.modelId}`;
   }
-  return best.size ? best : null;
+  return {
+    id: sessionIdOf(file),
+    workspace_id: workspaceId,
+    title,
+    model,
+    agent_type: "pi",
+    updated_at: new Date(statSync(file).mtimeMs).toISOString(),
+  };
 }
 
-// User-configured OpenCode models: providers declared in ~/.config/opencode/
-// opencode.json plus any opencode:* ids already used in past Conductor sessions
-// (covers dynamic providers like openrouter whose models aren't in the config).
-function opencodeModels(): string[] {
-  const ids: string[] = [];
-  try {
-    const cfg = JSON.parse(readFileSync(`${homedir()}/.config/opencode/opencode.json`, "utf8"));
-    for (const [prov, p] of Object.entries<any>(cfg.provider ?? {}))
-      for (const model of Object.keys(p?.models ?? {})) ids.push(`opencode:${prov}/${model}`);
-  } catch {}
-  try {
-    for (const r of db.prepare(`SELECT DISTINCT model FROM sessions WHERE model LIKE 'opencode:%'`).all() as { model: string }[])
-      if (!ids.includes(r.model)) ids.push(r.model);
-  } catch {}
-  return ids;
+// ── Display messages ────────────────────────────────────────────────────────
+// Same row shapes the phone already renders: user / assistant / thinking /
+// tool / duration rows in chronological order.
+const summarizeInput = (input: any) => {
+  const v = input?.file_path ?? input?.path ?? input?.command ?? input?.pattern ?? input?.description ?? "";
+  return String(v).slice(0, 80);
+};
+
+function displayMessages(sessionId: string) {
+  const found = findSessionFile(sessionId);
+  if (!found) return { error: "session not found", status: 404 };
+  const out: { id: string; role: string; content: string; created_at: string }[] = [];
+  let turnStart: number | null = null;
+  for (const e of activeBranch(readEntries(found.file))) {
+    if (e.type !== "message") continue;
+    const msg = e.message;
+    const createdAt = e.timestamp;
+    if (msg.role === "user") {
+      turnStart = new Date(e.timestamp).getTime();
+      const t = textOf(msg);
+      if (t) out.push({ id: e.id, role: "user", content: t, created_at: createdAt });
+    } else if (msg.role === "assistant") {
+      for (const [i, b] of (msg.content ?? []).entries()) {
+        if (b.type === "text" && b.text?.trim())
+          out.push({ id: `${e.id}-${i}`, role: "assistant", content: b.text, created_at: createdAt });
+        else if (b.type === "thinking" && b.thinking?.trim())
+          out.push({ id: `${e.id}-${i}`, role: "thinking", content: b.thinking, created_at: createdAt });
+        else if (b.type === "toolCall")
+          out.push({ id: `${e.id}-${i}`, role: "tool", content: `${b.name} ${summarizeInput(b.arguments)}`, created_at: createdAt });
+      }
+      if (msg.stopReason === "error" && msg.errorMessage)
+        out.push({ id: `${e.id}-err`, role: "assistant", content: `⚠️ ${String(msg.errorMessage).slice(0, 300)}`, created_at: createdAt });
+      if (msg.stopReason === "stop" && turnStart) {
+        const s = Math.round((new Date(e.timestamp).getTime() - turnStart) / 1000);
+        if (s >= 5) out.push({ id: `${e.id}-dur`, role: "duration", content: s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`, created_at: createdAt });
+        turnStart = null;
+      }
+    }
+    // toolResult rows are skipped — the tool row already shows the call.
+  }
+  return out;
 }
 
-// The bundle scan reads big files synchronously, so it runs at startup and on
-// a 10-minute timer — never on the request path. /models only assembles from
-// the cached scan (opencodeModels is a cheap config read + indexed query).
-let scannedGroups: Map<string, string[]> | null = null;
-const refreshScan = () => { try { scannedGroups = scanBundleModels(); } catch {} };
-refreshScan();
-setInterval(refreshScan, 10 * 60_000);
-
-function modelGroups() {
-  return FALLBACK_GROUPS.map(({ title, models }) => {
-    let found = title === "OpenCode" ? opencodeModels() : scannedGroups?.get(title) ?? [];
-    // "auto" is a real Cursor picker entry but too generic a string to scan for.
-    if (title === "Cursor" && found.length && !found.includes("auto")) found = ["auto", ...found];
-    return { title, models: found.length ? found : models };
-  });
+// ── Models ──────────────────────────────────────────────────────────────────
+// Pi's model catalog is first-class: `pi --list-models` prints provider/model
+// rows. Ids are "provider/model" and pass straight to `pi --model`.
+let modelCache: { title: string; models: string[] }[] = [];
+function refreshModels() {
+  const p = Bun.spawnSync(["pi", "--list-models"], { stdout: "pipe" });
+  if (p.exitCode !== 0) return;
+  const groups = new Map<string, string[]>();
+  for (const line of p.stdout.toString().split("\n").slice(1)) {
+    const m = line.match(/^(\S+)\s+(\S+)/);
+    if (!m) continue;
+    const list = groups.get(m[1]) ?? [];
+    list.push(`${m[1]}/${m[2]}`);
+    groups.set(m[1], list);
+  }
+  if (groups.size) modelCache = [...groups].map(([title, models]) => ({ title, models }));
 }
+refreshModels();
+setInterval(refreshModels, 10 * 60_000);
 
-// Conductor model id ("opus-4-8-1m") → claude CLI id ("claude-opus-4-8[1m]")
-const claudeCliModel = (m: string) =>
-  `claude-${m.replace(/-1m$/, "")}` + (m.endsWith("-1m") ? "[1m]" : "");
+// ── Creating workspaces & sessions ──────────────────────────────────────────
+// A session id minted here materializes on disk on first send (pi --session-id
+// creates it if missing). Until then remember which cwd it belongs to.
+const pendingSessions = new Map<string, string>(); // session id → cwd  (ponytail: in-memory; re-create from the phone if the server restarts)
 
 function createSession(workspaceId: string) {
-  const ws = db.query(`SELECT id FROM workspaces WHERE id = ?`).get(workspaceId);
+  const ws = wsById(workspaceId);
   if (!ws) return { error: "workspace not found", status: 404 };
-  const lastModel: any = db
-    .query(`SELECT model FROM sessions WHERE agent_type IS NULL OR agent_type = 'claude' ORDER BY updated_at DESC LIMIT 1`)
-    .get();
   const id = crypto.randomUUID();
-  wdb.prepare(
-    `INSERT INTO sessions (id, workspace_id, agent_type, model, title, status) VALUES (?, ?, 'claude', ?, 'Untitled', 'idle')`
-  ).run(id, workspaceId, lastModel?.model ?? "opus-4-8-1m");
-  return { id, workspace_id: workspaceId, title: "Untitled", model: lastModel?.model ?? "opus-4-8-1m",
-           agent_type: "claude", updated_at: new Date().toISOString() };
+  pendingSessions.set(id, ws.cwd);
+  return { id, workspace_id: workspaceId, title: "Untitled", model: null, agent_type: "pi",
+           updated_at: new Date().toISOString() };
 }
 
-// New workspace from the phone: a real git worktree in Conductor's own layout
-// (~/conductor/workspaces/<repo>/<city>) plus a workspaces row, so the desktop
-// app picks it up like any other. Undocumented schema — fails loud if it drifts.
 const CITIES = ["lisbon","porto","quito","nairobi","hanoi","tbilisi","perth","leipzig","malmo","bergen","cusco","davao","hobart","tampere","galway","split"];
 function createWorkspace(repoId: string) {
-  const repo: any = db.query(`SELECT id, name, root_path, default_branch FROM repos WHERE id = ?`).get(repoId);
-  if (!repo?.root_path || !existsSync(repo.root_path)) return { error: "repo not found", status: 404 };
-  const taken = new Set(
-    db.query(`SELECT directory_name FROM workspaces WHERE repository_id = ?`).all(repoId).map((w: any) => w.directory_name)
-  );
-  const city = CITIES.find((c) => !taken.has(c)) ?? `mobile-${Date.now()}`;
-  const path = `${homedir()}/conductor/workspaces/${repo.name}/${city}`;
+  const root = scanned().repoRoots.get(repoId);
+  if (!root || !existsSync(root)) return { error: "repo not found", status: 404 };
+  if (!git(root, "rev-parse", "--git-dir")) return { error: "not a git repo", status: 400 };
+  const name = basename(root);
+  const city = CITIES.find((c) => !existsSync(`${homedir()}/pi-workspaces/${name}/${c}`)) ?? `mobile-${Date.now()}`;
+  const path = `${homedir()}/pi-workspaces/${name}/${city}`;
   const branch = `mobile/${city}`;
-  const git = Bun.spawnSync(["git", "worktree", "add", "-b", branch, path], { cwd: repo.root_path });
-  if (git.exitCode !== 0)
-    return { error: `git worktree failed: ${git.stderr.toString().trim()}`, status: 500 };
-  const id = crypto.randomUUID();
-  wdb.prepare(
-    `INSERT INTO workspaces (id, repository_id, directory_name, workspace_name, branch, workspace_path,
-                             initialization_parent_branch, state, derived_status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 'in-progress')`
-  ).run(id, repoId, city, city, branch, path, repo.default_branch ?? "main");
-  const session = createSession(id);
-  return { id, repository_id: repoId, name: city, branch, status: "in-progress", unread: false,
-           updated_at: new Date().toISOString(), last_message_snippet: null, session };
+  const wt = Bun.spawnSync(["git", "worktree", "add", "-b", branch, path], { cwd: root, stdout: "pipe", stderr: "pipe" });
+  if (wt.exitCode !== 0)
+    return { error: `git worktree failed: ${wt.stderr.toString().trim()}`, status: 500 };
+  rememberCwd(path);
+  scanCache = null;
+  const id = encodeCwd(path);
+  return { id, repository_id: repoId, name: city, branch, status: "done", unread: false,
+           updated_at: new Date().toISOString(), last_message_snippet: null, session: createSession(id) };
 }
 
-async function workspaceDiff(workspaceId: string) {
-  const ws: any = db
-    .query(`SELECT w.workspace_path, coalesce(w.initialization_parent_branch, r.default_branch, 'main') AS base
-              FROM workspaces w LEFT JOIN repos r ON w.repository_id = r.id WHERE w.id = ?`)
-    .get(workspaceId);
-  if (!ws?.workspace_path || !existsSync(ws.workspace_path)) return { error: "workspace not found", status: 404 };
-  const git = (...a: string[]) =>
-    new Response(Bun.spawn(["git", ...a], { cwd: ws.workspace_path, stdout: "pipe" }).stdout as any).text();
-  const mergeBase = (await git("merge-base", ws.base, "HEAD").catch(() => "")).trim();
-  const ref = mergeBase || ws.base;
-  const [stat, diff] = await Promise.all([git("diff", "--stat", ref), git("diff", ref)]);
-  return { base: ws.base, stat, diff };
-}
-
-type Turn = { proc: ReturnType<typeof Bun.spawn> | null; running: boolean; activity: string };
+// ── Running turns via Pi RPC ────────────────────────────────────────────────
+type Turn = { proc: ReturnType<typeof Bun.spawn> | null; running: boolean; activity: string; cwd: string };
 const turns = new Map<string, Turn>();
 
 function sendMessage(sessionId: string, text: string, model?: string) {
   const existing = turns.get(sessionId);
   if (existing?.running) return { error: "agent is already working", status: 409 };
 
-  const session: any = db
-    .query(`SELECT s.*, w.workspace_path FROM sessions s JOIN workspaces w ON s.workspace_id = w.id WHERE s.id = ?`)
-    .get(sessionId);
-  if (!session) return { error: "session not found", status: 404 };
-  // Picking a model from a different harness switches the session's agent and
-  // starts a fresh thread for it — same behavior as the desktop picker.
-  const agentForModel = (m: string) =>
-    m.startsWith("gpt-") ? "codex"
-    : m.startsWith("opencode:") ? "acp"
-    : ["auto", "composer", "grok"].some(p => m.startsWith(p)) ? "cursor"
-    : "claude";
-  const agent = model ? agentForModel(model) : (session.agent_type ?? "claude");
-  if (!["claude", "codex", "cursor", "acp"].includes(agent))
-    return { error: `unsupported agent type: ${agent}`, status: 400 };
-  if (model && agent !== (session.agent_type ?? "claude")) {
-    wdb.prepare(`UPDATE sessions SET agent_type = ?, claude_session_id = NULL WHERE id = ?`).run(agent, sessionId);
-    session.agent_type = agent;
-    session.claude_session_id = null;
-  }
-  if (!session.workspace_path || !existsSync(session.workspace_path))
-    return { error: "workspace directory not found on this Mac", status: 400 };
+  const found = findSessionFile(sessionId);
+  const cwd = found?.cwd ?? pendingSessions.get(sessionId);
+  if (!cwd) return { error: "session not found", status: 404 };
+  if (!existsSync(cwd)) return { error: "workspace directory not found on this Mac", status: 400 };
 
-  const turn: Turn = { proc: null, running: true, activity: "Starting agent…" };
+  const args = ["pi", "--mode", "rpc"];
+  if (found) args.push("--session", found.file);
+  else args.push("--session-id", sessionId);
+  if (model) args.push("--model", model);
+
+  const turn: Turn = { proc: null, running: true, activity: "Starting agent…", cwd };
   turns.set(sessionId, turn);
-  const turnId = crypto.randomUUID();
-  const senderId: any = db
-    .query(`SELECT sender_id FROM session_messages WHERE session_id = ? AND sender_id IS NOT NULL LIMIT 1`)
-    .get(sessionId);
-  // Mirror Conductor's row shape exactly: user rows carry model + sender; assistant
-  // rows carry the stream event's uuid as sdk_message_id and no model.
-  const push = (role: string, content: string, sdkId: string | null = null) => {
-    const now = new Date().toISOString();
-    const id = role === "user" ? turnId : crypto.randomUUID();
-    insertMsg.run(id, sessionId, role, content, now, now,
-      role === "user" ? session.model : null, turnId,
-      role === "user" ? senderId?.sender_id ?? null : null, sdkId);
-  };
-  push("user", text);
-
-  const resumeId = session.claude_session_id;
-  // Conductor normalizes every harness into claude-style envelopes; for non-claude
-  // agents we synthesize them from each CLI's own output format.
-  const envelope = (blocks: any[]) =>
-    JSON.stringify({ type: "assistant", session_id: resumeId, message: { role: "assistant", content: blocks } });
-  const pushEnv = (blocks: any[]) => push("assistant", envelope(blocks), crypto.randomUUID());
-  const resultEnv = (extra: any = {}) =>
-    push("assistant", JSON.stringify({ type: "result", session_id: resumeId, subtype: "finished", is_error: false, ...extra }), crypto.randomUUID());
-
-  let args: string[];
-  let handleLine: (line: string) => void;
-  let cursorText = ""; // cursor streams text deltas; final text arrives in its result event
-
-  if (model) updateSessionModel.run(model, sessionId); // persist the switch, desktop sees it too
-
-  if (agent === "claude") {
-    args = ["claude", "-p", text, "--output-format", "stream-json", "--verbose",
-            "--permission-mode", "acceptEdits"]; // ponytail: no remote approval UI yet
-    if (resumeId) args.push("--resume", resumeId);
-    const m = model ?? session.model;
-    if (m) args.push("--model", claudeCliModel(m));
-    handleLine = (line) => {
-      const ev = JSON.parse(line);
-      if (ev.type === "assistant") {
-        push("assistant", line, ev.uuid ?? null); // claude's output IS the native format
-        for (const b of ev.message?.content ?? [])
-          if (b.type === "tool_use") turn.activity = `${b.name} ${summarizeInput(b.input)}`;
-      } else if (ev.type === "result") {
-        push("assistant", line, ev.uuid ?? null);
-        if (ev.session_id) updateClaudeSessionId.run(ev.session_id, sessionId);
-      }
-    };
-  } else if (agent === "codex") {
-    // Conductor's bundled codex — the nvm-installed one on PATH is broken.
-    const codexBin = `${homedir()}/Library/Application Support/com.conductor.app/bin/codex`;
-    args = resumeId
-      ? [existsSync(codexBin) ? codexBin : "codex", "exec", "resume", resumeId, "--json", text]
-      : [existsSync(codexBin) ? codexBin : "codex", "exec", "--json", text];
-    if (model) args.push("-m", model);
-    handleLine = (line) => {
-      const ev = JSON.parse(line);
-      const item = ev.item;
-      if (ev.type === "item.completed" && item) {
-        if (item.type === "agent_message" && item.text) pushEnv([{ type: "text", text: item.text }]);
-        else if (item.type === "reasoning" && item.text) pushEnv([{ type: "thinking", thinking: item.text }]);
-        else if (item.type === "command_execution") {
-          turn.activity = item.command ?? "Running command…";
-          pushEnv([{ type: "tool_use", id: crypto.randomUUID(), name: "Bash", input: { command: item.command } }]);
-        } else if (item.type === "file_change") {
-          turn.activity = "Editing files…";
-          pushEnv([{ type: "tool_use", id: crypto.randomUUID(), name: "Edit",
-                     input: { file_path: item.changes?.map((c: any) => c.path).join(", ") ?? "" } }]);
-        }
-      } else if (ev.type === "thread.started" && ev.thread_id) {
-        updateClaudeSessionId.run(ev.thread_id, sessionId); // fresh codex thread — remember it
-      } else if (ev.type === "turn.completed") resultEnv({ usage: ev.usage });
-      else if (ev.type === "error") pushEnv([{ type: "text", text: `⚠️ ${ev.message}` }]);
-    };
-  } else if (agent === "cursor") {
-    // --trust: worktrees Conductor creates aren't in cursor's trusted list; same
-    // trust the user already granted this repo on the desktop.
-    args = ["cursor-agent", "-p", text, "--output-format", "stream-json", "--trust"];
-    if (resumeId) args.push("--resume", resumeId);
-    const m = model ?? session.model;
-    if (m) args.push("--model", m);
-    handleLine = (line) => {
-      const ev = JSON.parse(line);
-      if (ev.type === "assistant")
-        for (const b of ev.message?.content ?? []) if (b.type === "text") cursorText += b.text;
-      if (ev.type === "tool_call" || ev.type === "tool_use") turn.activity = "Using tools…";
-      if (ev.type === "result") {
-        const final = ev.result || cursorText;
-        if (final) pushEnv([{ type: "text", text: final }]);
-        push("assistant", line, crypto.randomUUID());
-        if (!resumeId && ev.session_id) updateClaudeSessionId.run(ev.session_id, sessionId);
-      }
-    };
-  } else {
-    // acp = opencode. Plain-text output; one assistant envelope at the end.
-    if (!resumeId)
-      return { error: "OpenCode chats have to be started from the desktop for now", status: 400 };
-    args = ["opencode", "run", "--session", resumeId, text];
-    const m = (model ?? session.model)?.replace(/^opencode:/, "");
-    if (m) args.push("--model", m);
-    handleLine = () => {}; // buffered below instead
-  }
-
-  turn.proc = Bun.spawn(args, { cwd: session.workspace_path, stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn(args, { cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  turn.proc = proc;
+  proc.stdin.write(JSON.stringify({ id: "1", type: "prompt", message: text }) + "\n");
+  proc.stdin.flush();
 
   (async () => {
     let buf = "";
-    let all = "";
-    for await (const chunk of turn.proc!.stdout as any) {
-      const s = new TextDecoder().decode(chunk);
-      all += s;
-      buf += s;
+    for await (const chunk of proc.stdout as any) {
+      buf += new TextDecoder().decode(chunk);
       const lines = buf.split("\n");
       buf = lines.pop()!;
       for (const line of lines) {
         if (!line.trim()) continue;
-        try { handleLine(line); } catch {}
+        let ev: any;
+        try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === "tool_execution_start")
+          turn.activity = `${ev.toolName ?? "tool"} ${summarizeInput(ev.args)}`;
+        else if (ev.type === "message_start" && ev.message?.role === "assistant")
+          turn.activity = "Thinking…";
+        else if (ev.type === "response" && ev.success === false)
+          turn.activity = `⚠️ ${ev.error ?? "command failed"}`;
+        else if (ev.type === "agent_end") {
+          proc.stdin.end();
+          proc.kill(); // pi stays resident waiting for more commands; the turn is done
+        }
       }
     }
-    const code = await turn.proc!.exited;
-    if (agent === "acp" && all.trim()) {
-      pushEnv([{ type: "text", text: all.trim() }]);
-      resultEnv();
-    }
-    if (code !== 0) {
-      const err = await new Response(turn.proc!.stderr as any).text().catch(() => "");
-      pushEnv([{ type: "text", text: `⚠️ ${agent} exited with code ${code}. ${err.slice(0, 300)}` }]);
-    }
+    await proc.exited;
+    pendingSessions.delete(sessionId); // it's on disk now
     turn.running = false;
     turn.activity = "";
   })();
@@ -358,100 +338,56 @@ function sendMessage(sessionId: string, text: string, model?: string) {
   return { ok: true };
 }
 
-// conductor.db stores 'YYYY-MM-DD HH:MM:SS' (UTC) or ISO strings; normalize to ISO8601.
-const iso = (d: string | null) =>
-  d ? new Date(d.includes("T") ? d : d.replace(" ", "T") + "Z").toISOString() : null;
-
-const repos = () =>
-  db
-    .query(
-      `SELECT r.id, r.name, r.default_branch,
-              (SELECT count(*) FROM workspaces w
-                WHERE w.repository_id = r.id AND w.state != 'archived') AS active_workspace_count
-         FROM repos r WHERE r.hidden = 0 ORDER BY r.display_order, r.name`
-    )
-    .all();
-
-const workspaces = (repoId: string) =>
-  db
-    .query(
-      `SELECT w.id, w.repository_id, coalesce(w.workspace_name, w.directory_name) AS name,
-              w.branch, coalesce(w.manual_status, w.derived_status) AS status,
-              w.unread, w.updated_at,
-              (SELECT s.title FROM sessions s WHERE s.workspace_id = w.id
-                ORDER BY s.updated_at DESC LIMIT 1) AS last_message_snippet
-         FROM workspaces w
-        WHERE w.repository_id = ? AND w.state != 'archived'
-        ORDER BY w.updated_at DESC`
-    )
-    .all(repoId)
-    .map((w: any) => ({ ...w, unread: !!w.unread, updated_at: iso(w.updated_at) }));
-
-const sessions = (workspaceId: string) =>
-  db
-    .query(
-      `SELECT id, workspace_id, title, model, agent_type, updated_at FROM sessions
-        WHERE workspace_id = ? AND is_hidden = 0 ORDER BY updated_at DESC`
-    )
-    .all(workspaceId)
-    .map((s: any) => ({ ...s, updated_at: iso(s.updated_at) }));
-
-// Flatten Claude Code stream-JSON envelopes into displayable messages.
-function displayMessages(sessionId: string) {
-  const rows = db
-    .query(
-      `SELECT id, role, content, created_at FROM session_messages
-        WHERE session_id = ? AND content IS NOT NULL AND cancelled_at IS NULL
-        ORDER BY created_at, id`
-    )
-    .all(sessionId) as any[];
-
-  const out: { id: string; role: string; content: string; created_at: string }[] = [];
-  for (const row of rows) {
-    const createdAt = iso(row.created_at)!;
-    let env: any;
-    try {
-      env = JSON.parse(row.content);
-    } catch {
-      // Plain text (typically the user's typed message).
-      out.push({ id: row.id, role: row.role, content: row.content, created_at: createdAt });
-      continue;
-    }
-    const blocks = env?.message?.content;
-    if (env?.type === "assistant" && Array.isArray(blocks)) {
-      for (const [i, b] of blocks.entries()) {
-        if (b.type === "text" && b.text.trim())
-          out.push({ id: `${row.id}-${i}`, role: "assistant", content: b.text, created_at: createdAt });
-        else if (b.type === "thinking" && b.thinking?.trim())
-          out.push({ id: `${row.id}-${i}`, role: "thinking", content: b.thinking, created_at: createdAt });
-        else if (b.type === "tool_use")
-          out.push({
-            id: `${row.id}-${i}`,
-            role: "tool",
-            content: `${b.name} ${summarizeInput(b.input)}`,
-            created_at: createdAt,
-          });
-      }
-    } else if (env?.type === "user") {
-      const c = env.message?.content;
-      if (typeof c === "string" && c.trim())
-        out.push({ id: row.id, role: "user", content: c, created_at: createdAt });
-      // tool_result blocks are skipped for v1; the tool row already shows the call.
-    }
-    else if (env?.type === "result" && env.duration_ms) {
-      const s = Math.round(env.duration_ms / 1000);
-      const dur = s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
-      out.push({ id: row.id, role: "duration", content: dur, created_at: createdAt });
-    }
-    // system envelopes are skipped — internal.
-  }
-  return out;
-}
-
-const summarizeInput = (input: any) => {
-  const v = input?.file_path ?? input?.command ?? input?.pattern ?? input?.description ?? "";
-  return String(v).slice(0, 80);
+// ── HTTP API (same shapes the phone already speaks) ─────────────────────────
+const repos = () => {
+  const { workspaces, repoOf, repoRoots } = scanned();
+  return [...repoRoots]
+    .map(([id, root]) => ({
+      id,
+      name: basename(root),
+      default_branch: git(root, "symbolic-ref", "--short", "HEAD") ?? "main",
+      active_workspace_count: [...repoOf.values()].filter((r) => r === id).length,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 };
+
+const workspacesOf = (repoId: string) => {
+  const { workspaces, repoOf } = scanned();
+  return [...workspaces]
+    .filter(([id]) => repoOf.get(id) === repoId)
+    .map(([id, ws]) => {
+      const newest = ws.dir ? sessionFiles(ws.dir)[0] : null;
+      return {
+        id,
+        repository_id: repoId,
+        name: basename(ws.cwd),
+        branch: git(ws.cwd, "branch", "--show-current"),
+        status: [...turns.values()].some((t) => t.running && t.cwd === ws.cwd) ? "in-progress" : "done",
+        unread: false,
+        updated_at: new Date(ws.mtime).toISOString(),
+        last_message_snippet: newest ? sessionSummary(`${ws.dir}/${newest}`, id).title : null,
+      };
+    })
+    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
+};
+
+const sessionsOf = (workspaceId: string) => {
+  const ws = wsById(workspaceId);
+  if (!ws?.dir) return [];
+  return sessionFiles(ws.dir).map((f) => sessionSummary(`${ws.dir}/${f}`, workspaceId));
+};
+
+async function workspaceDiff(workspaceId: string) {
+  const ws = wsById(workspaceId);
+  if (!ws || !existsSync(ws.cwd)) return { error: "workspace not found", status: 404 };
+  const g = (...a: string[]) =>
+    new Response(Bun.spawn(["git", ...a], { cwd: ws.cwd, stdout: "pipe" }).stdout as any).text();
+  const base = git(ws.cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")?.replace(/^origin\//, "") ?? "main";
+  const mergeBase = (await g("merge-base", base, "HEAD").catch(() => "")).trim();
+  const ref = mergeBase || base;
+  const [stat, diff] = await Promise.all([g("diff", "--stat", ref), g("diff", ref)]);
+  return { base, stat, diff };
+}
 
 Bun.serve({
   port: PORT,
@@ -469,24 +405,62 @@ Bun.serve({
         const r = sendMessage(m[1], text.trim(), model);
         return Response.json(r, { status: "status" in r ? (r.status as number) : 200 });
       }
+      // Deleting a chat moves its session file to ~/.pi-companion/trash (recoverable).
+      if (req.method === "DELETE" && (m = path.match(/^\/sessions\/([^/]+)$/))) {
+        const found = findSessionFile(m[1]);
+        if (!found) return Response.json({ error: "session not found" }, { status: 404 });
+        const trash = `${tokenDir}/trash`;
+        mkdirSync(trash, { recursive: true });
+        renameSync(found.file, `${trash}/${basename(found.file)}`);
+        scanCache = null;
+        return Response.json({ ok: true });
+      }
+      // "Deleting" a workspace unregisters the folder from the app; nothing on
+      // disk is touched (worktrees and session files stay).
+      if (req.method === "DELETE" && (m = path.match(/^\/workspaces\/([^/]+)$/))) {
+        const ws = wsById(m[1]);
+        if (!ws) return Response.json({ error: "workspace not found" }, { status: 404 });
+        forgetCwd(ws.cwd);
+        scanCache = null;
+        return Response.json({ ok: true });
+      }
       if (req.method === "POST" && (m = path.match(/^\/sessions\/([^/]+)\/stop$/))) {
         const t = turns.get(m[1]);
+        try { t?.proc?.stdin?.write(JSON.stringify({ id: "stop", type: "abort" }) + "\n"); } catch {}
         t?.proc?.kill();
         return Response.json({ ok: true });
       }
-      // Serve workspace-relative attachment files (images pasted into chats live
-      // under <workspace>/.context/attachments/).
       if ((m = path.match(/^\/sessions\/([^/]+)\/attachments$/))) {
         const rel = new URL(req.url).searchParams.get("path") ?? "";
-        const ws: any = db
-          .query(`SELECT w.workspace_path FROM sessions s JOIN workspaces w ON s.workspace_id = w.id WHERE s.id = ?`)
-          .get(m[1]);
-        if (!ws?.workspace_path) return Response.json({ error: "not found" }, { status: 404 });
-        const full = resolve(ws.workspace_path, decodeURIComponent(rel));
-        if (!full.startsWith(resolve(ws.workspace_path) + "/"))
+        const found = findSessionFile(m[1]);
+        if (!found) return Response.json({ error: "not found" }, { status: 404 });
+        const full = resolve(found.cwd, decodeURIComponent(rel));
+        if (!full.startsWith(resolve(found.cwd) + "/"))
           return Response.json({ error: "forbidden" }, { status: 403 });
         if (!existsSync(full)) return Response.json({ error: "not found" }, { status: 404 });
         return new Response(Bun.file(full));
+      }
+      // Browse folders on the Mac for the phone's project picker.
+      if (path === "/browse") {
+        const q = new URL(req.url).searchParams.get("path") || homedir();
+        const dir = resolve(q.startsWith("~/") ? `${homedir()}/${q.slice(2)}` : q);
+        if (!existsSync(dir) || !statSync(dir).isDirectory())
+          return Response.json({ error: "not a folder" }, { status: 404 });
+        const dirs = readdirSync(dir)
+          .filter((n) => !n.startsWith(".") && n !== "node_modules")
+          .filter((n) => { try { return statSync(`${dir}/${n}`).isDirectory(); } catch { return false; } })
+          .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+        return Response.json({ path: dir, parent: dir === "/" ? null : dirname(dir), dirs });
+      }
+      // Register a project folder that has no Pi sessions yet.
+      if (req.method === "POST" && path === "/projects") {
+        const { path: dir } = await req.json();
+        const full = dir?.startsWith("~/") ? `${homedir()}/${dir.slice(2)}` : dir;
+        if (!full || !existsSync(full) || !statSync(full).isDirectory())
+          return Response.json({ error: "folder not found on this Mac" }, { status: 404 });
+        rememberCwd(resolve(full));
+        scanCache = null;
+        return Response.json({ ok: true });
       }
       if (req.method === "POST" && (m = path.match(/^\/repos\/([^/]+)\/workspaces$/))) {
         const r = createWorkspace(m[1]);
@@ -497,18 +471,13 @@ Bun.serve({
         return Response.json(r, { status: "status" in r ? (r.status as number) : 200 });
       }
       if ((m = path.match(/^\/workspaces\/([^/]+)\/diffstat$/))) {
-        const ws: any = db
-          .query(`SELECT w.workspace_path, coalesce(w.initialization_parent_branch, r.default_branch, 'main') AS base
-                    FROM workspaces w LEFT JOIN repos r ON w.repository_id = r.id WHERE w.id = ?`)
-          .get(m[1]);
-        if (!ws?.workspace_path || !existsSync(ws.workspace_path)) return Response.json({ error: "not found" }, { status: 404 });
-        const git = (...a: string[]) =>
-          new Response(Bun.spawn(["git", ...a], { cwd: ws.workspace_path, stdout: "pipe" }).stdout as any).text();
-        const mb = (await git("merge-base", ws.base, "HEAD").catch(() => "")).trim();
-        const short = await git("diff", "--shortstat", mb || ws.base);
-        const ins = Number(short.match(/(\d+) insertion/)?.[1] ?? 0);
-        const del = Number(short.match(/(\d+) deletion/)?.[1] ?? 0);
-        return Response.json({ insertions: ins, deletions: del });
+        const ws = wsById(m[1]);
+        if (!ws) return Response.json({ error: "not found" }, { status: 404 });
+        const short = git(ws.cwd, "diff", "--shortstat", "HEAD") ?? "";
+        return Response.json({
+          insertions: Number(short.match(/(\d+) insertion/)?.[1] ?? 0),
+          deletions: Number(short.match(/(\d+) deletion/)?.[1] ?? 0),
+        });
       }
       if ((m = path.match(/^\/workspaces\/([^/]+)\/diff$/))) {
         const r = await workspaceDiff(m[1]);
@@ -518,11 +487,14 @@ Bun.serve({
         const t = turns.get(m[1]);
         return Response.json({ running: !!t?.running, activity: t?.activity ?? "" });
       }
-      if (path === "/models") return Response.json(modelGroups());
+      if (path === "/models") return Response.json(modelCache);
       if (path === "/repos") return Response.json(repos());
-      if ((m = path.match(/^\/repos\/([^/]+)\/workspaces$/))) return Response.json(workspaces(m[1]));
-      if ((m = path.match(/^\/workspaces\/([^/]+)\/sessions$/))) return Response.json(sessions(m[1]));
-      if ((m = path.match(/^\/sessions\/([^/]+)\/messages$/))) return Response.json(displayMessages(m[1]));
+      if ((m = path.match(/^\/repos\/([^/]+)\/workspaces$/))) return Response.json(workspacesOf(m[1]));
+      if ((m = path.match(/^\/workspaces\/([^/]+)\/sessions$/))) return Response.json(sessionsOf(m[1]));
+      if ((m = path.match(/^\/sessions\/([^/]+)\/messages$/))) {
+        const r = displayMessages(m[1]);
+        return Response.json(r, { status: "status" in r && !Array.isArray(r) ? (r as any).status : 200 });
+      }
     } catch (e) {
       return Response.json({ error: String(e) }, { status: 500 });
     }
@@ -530,16 +502,16 @@ Bun.serve({
   },
 });
 
-console.log(`Conductor companion listening on http://0.0.0.0:${PORT}`);
+console.log(`Pi companion listening on http://0.0.0.0:${PORT}`);
 console.log(`Auth token: ${TOKEN}`);
 
-// Pairing QR: scan with the iPhone Camera app to open Conductor Companion
-// with the address + token pre-filled.
+// Pairing QR: scan with the iPhone Camera app to open the app with the
+// address + token pre-filled.
 import { hostname } from "os";
 import qrcode from "qrcode-terminal"; // bun auto-installs on first run
 const host = hostname().replace(/\.local$/, "");
 const pairURL =
-  `conductor-companion://pair?name=${encodeURIComponent(host)}` +
+  `pi-companion://pair?name=${encodeURIComponent(host)}` +
   `&addr=${encodeURIComponent(`http://${host}.local:${PORT}`)}&token=${TOKEN}`;
 qrcode.generate(pairURL, { small: true });
 console.log(`Scan with the iPhone camera to pair (same network), or enter the token manually.`);

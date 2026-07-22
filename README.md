@@ -1,36 +1,23 @@
 <p align="center">
-  <img src="docs/images/conductor-mobile-icon.png" width="160" alt="Conductor Mobile app icon">
+  <img src="docs/images/pi-mobile-icon.png" width="160" alt="Pi Mobile app icon">
 </p>
 
-# Conductor Mobile
+# Pi Mobile
 
-An unofficial iOS companion app for [Conductor](https://www.conductor.build/) — browse your projects, workspaces, and chat history from your phone, and keep talking to your agents while away from your Mac.
+An unofficial iOS companion app for the [Pi coding agent](https://pi.dev) — browse your projects and sessions, read full chat history, and keep talking to your agents while away from your Mac.
 
-Conductor doesn't have a mobile app, so this one works by pairing a small companion server on your Mac (which reads Conductor's local SQLite database and drives the agent CLIs directly) with a native SwiftUI app on the phone.
+Pi is a terminal agent, so this app pairs a small companion server on your Mac (which reads Pi's session files and drives Pi over its RPC protocol) with a native SwiftUI app on the phone. Everything it touches is documented Pi surface — the session JSONL format and the RPC mode — no undocumented internals.
 
-<p align="center"><em>Start a task on your laptop → go for a walk → keep directing the agent from your phone → come back and continue on the desktop.</em></p>
-
-## Screenshots
-
-<p align="center">
-  <a href="docs/images/projects.png"><img src="docs/images/projects.png" width="31%" alt="Browse your Conductor projects and workspaces"></a>
-  <a href="docs/images/chat.png"><img src="docs/images/chat.png" width="31%" alt="Chat with an agent from your phone"></a>
-  <a href="docs/images/realtime.png"><img src="docs/images/realtime.png" width="31%" alt="Watch agent work arrive in real time"></a>
-</p>
-
-<p align="center">
-  <a href="docs/images/diffs.png"><img src="docs/images/diffs.png" width="31%" alt="Review workspace diffs on your phone"></a>
-  <a href="docs/images/macs.png"><img src="docs/images/macs.png" width="31%" alt="Switch between connected Macs"></a>
-</p>
+<p align="center"><em>Start a task in your terminal → go for a walk → keep directing the agent from your phone → come back and `pi -c` to continue on the desktop.</em></p>
 
 ## Features
 
-- **Projects & workspaces** — all your Conductor repos and worktrees, with live status badges, branches, and unread indicators
-- **Full chat history** — messages, thinking blocks, tool calls, durations, inline images
-- **Send messages** — continue any session from your phone; replies stream in with a live activity line and stop button
-- **All harnesses** — Claude Code, Codex, Cursor (Grok/Composer), and OpenCode sessions are all supported
-- **Desktop sync** — turns sent from the phone are written into Conductor's database in its native format, so they appear in the desktop app (after a Conductor restart) and the conversation never forks
-- **Model picker** — override the model per-send on Claude Code sessions (including 1M-context variants)
+- **Projects & workspaces** — every folder you've run `pi` in, grouped by git repo (worktrees appear under their main checkout), with branches and live status badges
+- **Full chat history** — messages, thinking blocks, tool calls, inline images
+- **Send messages** — continue any session from your phone; because the phone and the terminal share the same session file, `pi -c` on the Mac picks up exactly where you left off — no restarts, no forked conversations
+- **New sessions & workspaces** — start a fresh session, or spin up a new git worktree, from the phone
+- **Model picker** — Pi's full model catalog (15+ providers), switchable per-send, mid-session
+- **Diffs** — review each workspace's uncommitted/branch changes on your phone
 
 ## How it works
 
@@ -39,45 +26,39 @@ iPhone app (SwiftUI)
       │  HTTP + bearer token (use Tailscale to reach your Mac from anywhere)
       ▼
 Companion server on the Mac (Bun, single file)
-      ├─ READ:  Conductor's SQLite db → repos, workspaces, sessions, messages
-      ├─ WRITE: phone-sent turns → same db, Conductor's native envelope format
-      └─ RUN:   claude / codex / cursor-agent / opencode CLIs, resuming the
-                session in the workspace's worktree
+      ├─ READ:  ~/.pi/agent/sessions/*.jsonl → projects, sessions, messages
+      └─ RUN:   pi --mode rpc, resuming the session file in its project folder
+                (pi appends the new turns to the same file itself)
 ```
 
 ## Setup
 
 ### Mac (companion server)
 
-Requires [Bun](https://bun.sh) and Conductor.
+Requires [Bun](https://bun.sh) and [Pi](https://pi.dev).
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/MRL-00/conductor-mobile/main/server/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MRL-00/pi-mobile/main/server/install.sh | bash
 ```
 
 (Or from a checkout: `./server/install.sh`.)
 
-This installs a login LaunchAgent that keeps the server running (and the Mac awake via `caffeinate -s`), auto-restarts it, and prints the auth token for the phone app. Token persists in `~/.conductor-companion/token`; logs in `~/.conductor-companion/server.log`. Uninstall with `./server/install.sh --uninstall`. (Or just run it manually: `cd server && bun run server.ts`.)
+This installs a login LaunchAgent that keeps the server running (and the Mac awake via `caffeinate -s`), auto-restarts it, and prints the auth token for the phone app. Token persists in `~/.pi-companion/token`; logs in `~/.pi-companion/server.log`. Uninstall with `./server/install.sh --uninstall`. (Or just run it manually: `cd server && bun run server.ts`.)
 
 ### iPhone
 
-Open `ConductorMobile.xcodeproj` in Xcode (26+), build to your device (iOS 26+). In the app's Settings, enter:
+Open `PiMobile.xcodeproj` in Xcode (26+), build to your device (iOS 26+). Then either:
 
-- Or scan the QR code the server prints with the iPhone camera — it fills in the address and token automatically. Manual entry still works:
+- Scan the QR code the server prints with the iPhone camera — it fills in the address and token automatically. Or manually, in the app's Settings:
 - **Server address** — `http://<your-mac>:8940` (a [Tailscale](https://tailscale.com) hostname makes this work from anywhere)
 - **Auth token** — the token the server printed
 
 ## Caveats
 
-- Conductor's database schema is **undocumented and unofficial** — a Conductor update may change it and break things (loudly, not silently). Back up `~/Library/Application Support/com.conductor.app/conductor.db` if you're cautious.
-- The desktop app shows phone-sent turns after a restart (it reads the db on launch).
-- Claude Code sessions run with `--permission-mode acceptEdits`; riskier actions are auto-denied rather than prompted. Cursor sessions run with `--trust`.
-- Non-Claude harness adapters are built against current CLI output formats (codex 0.144, cursor-agent, opencode) and may need tweaks as those CLIs evolve.
+- Turns started from the phone run with Pi's default tool permissions — there's no remote approval UI yet.
+- A session that's open in a terminal `pi` and driven from the phone at the same time can race; finish one before the other (Pi's file format keeps history safe either way).
+- Session titles are derived from the first user message (Pi sessions have no title field).
 
 ## Security
 
-The server exposes your chat history and can run agents in your repos. It requires a bearer token on every request, serves attachments only from within workspace directories, and should only be reachable over a private network (LAN or Tailscale). Don't port-forward it to the open internet.
-
-## Status
-
-Personal project, built for our own workflow. PRs and issues welcome, but no promises.
+The server exposes your chat history and can run agents in your repos. It requires a bearer token on every request, serves attachments only from within project directories, and should only be reachable over a private network (LAN or Tailscale). Don't port-forward it to the open internet.

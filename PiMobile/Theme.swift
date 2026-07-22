@@ -1,6 +1,6 @@
 import SwiftUI
 
-// Design tokens from "Conductor Mobile.dc.html" (claude.ai/design).
+// Design tokens from "Pi Mobile.dc.html" (claude.ai/design).
 enum Theme {
     static let bg = Color(red: 0.039, green: 0.039, blue: 0.043)          // #0A0A0B
     static let card = Color(red: 0.11, green: 0.11, blue: 0.125).opacity(0.6)

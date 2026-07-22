@@ -7,9 +7,9 @@
 	objects = {
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		A1000001 /* ConductorMobile */ = {
+		A1000001 /* PiMobile */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = ConductorMobile;
+			path = PiMobile;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -18,7 +18,7 @@
 		A1000002 = {
 			isa = PBXGroup;
 			children = (
-				A1000001 /* ConductorMobile */,
+				A1000001 /* PiMobile */,
 				A1000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -26,7 +26,7 @@
 		A1000003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				A1000004 /* ConductorMobile.app */,
+				A1000004 /* PiMobile.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -34,13 +34,13 @@
 /* End PBXGroup section */
 
 /* Begin PBXFileReference section */
-		A1000004 /* ConductorMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ConductorMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1000004 /* PiMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PiMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXNativeTarget section */
-		A1000005 /* ConductorMobile */ = {
+		A1000005 /* PiMobile */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = A1000006 /* Build configuration list for PBXNativeTarget "ConductorMobile" */;
+			buildConfigurationList = A1000006 /* Build configuration list for PBXNativeTarget "PiMobile" */;
 			buildPhases = (
 				A1000007 /* Sources */,
 				A1000008 /* Resources */,
@@ -50,13 +50,13 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				A1000001 /* ConductorMobile */,
+				A1000001 /* PiMobile */,
 			);
-			name = ConductorMobile;
+			name = PiMobile;
 			packageProductDependencies = (
 			);
-			productName = ConductorMobile;
-			productReference = A1000004 /* ConductorMobile.app */;
+			productName = PiMobile;
+			productReference = A1000004 /* PiMobile.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -74,7 +74,7 @@
 					};
 				};
 			};
-			buildConfigurationList = A100000A /* Build configuration list for PBXProject "ConductorMobile" */;
+			buildConfigurationList = A100000A /* Build configuration list for PBXProject "PiMobile" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -88,7 +88,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				A1000005 /* ConductorMobile */,
+				A1000005 /* PiMobile */,
 			);
 		};
 /* End PBXProject section */
@@ -159,11 +159,11 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = U5LM2CZXRN;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 10;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connects to the Conductor companion server on your Mac.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connects to the Pi companion server on your Mac.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -172,8 +172,9 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.matt-nz.conductormobile";
+				MARKETING_VERSION = 0.2.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.matt-nz.pimobile";
+				INFOPLIST_KEY_CFBundleDisplayName = "Pi Companion";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -187,11 +188,11 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = U5LM2CZXRN;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 10;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connects to the Conductor companion server on your Mac.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connects to the Pi companion server on your Mac.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -200,8 +201,9 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.matt-nz.conductormobile";
+				MARKETING_VERSION = 0.2.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.matt-nz.pimobile";
+				INFOPLIST_KEY_CFBundleDisplayName = "Pi Companion";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -211,7 +213,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		A1000006 /* Build configuration list for PBXNativeTarget "ConductorMobile" */ = {
+		A1000006 /* Build configuration list for PBXNativeTarget "PiMobile" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				A100000D /* Debug */,
@@ -220,7 +222,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		A100000A /* Build configuration list for PBXProject "ConductorMobile" */ = {
+		A100000A /* Build configuration list for PBXProject "PiMobile" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				A100000B /* Debug */,
