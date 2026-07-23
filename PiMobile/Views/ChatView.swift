@@ -1,4 +1,13 @@
+import PhotosUI
 import SwiftUI
+import UIKit
+
+struct PendingImage: Identifiable {
+    let id = UUID()
+    let image: UIImage
+    let mimeType: String
+    let data: Data
+}
 
 struct ChatView: View {
     @Environment(APIClient.self) private var api
@@ -13,151 +22,479 @@ struct ChatView: View {
     @State private var running = false
     @State private var activity = ""
     @State private var model: String?   // Pi "provider/model" id; nil = session default
+    @State private var thinking: String? = nil  // nil = Pi default
+    @State private var approvalMode: ApprovalMode = .auto
+    @State private var pendingImages: [PendingImage] = []
+    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var showPhotoPicker = false
+    @State private var showCamera = false
+    @State private var cameraImage: UIImage?
+    @State private var dictation = SpeechDictation()
+    @State private var alertMessage: String?
+    @State private var showInstallApproval = false
+    @State private var pendingUI: PendingUI?
+    @State private var showApprovalPrompt = false
+    @State private var showModelPicker = false
+    /// Active turn starts at this user message; a stable "active-turn" frame
+    /// keeps it at the top while the reply grows underneath.
+    @State private var pinnedMessageId: String?
+    @State private var pinnedContent: String?
+    /// Server message ids present when the current send started — used so
+    /// optimistic rows / image pins don't latch onto an older same-text turn.
+    @State private var turnBaselineIds: Set<String> = []
+    @State private var scrollPosition = ScrollPosition(idType: String.self)
+    @State private var viewportHeight: CGFloat = 560
+    @State private var isAtBottom = true
+
+    private static let activeTurnID = "active-turn"
+    private static let chatBottomID = "chat-bottom"
+
+    private var turnStartIndex: Int? {
+        guard let pinnedMessageId else { return nil }
+        return messages.firstIndex(where: { $0.id == pinnedMessageId })
+    }
+
+    private var selectedModelId: String? { model ?? session?.model }
+    private var selectedModelInfo: ModelInfo? {
+        HarnessModels.info(for: selectedModelId, in: api.modelGroups)
+    }
+    private var modelSupportsThinking: Bool { selectedModelInfo?.supportsThinking == true }
+    private var modelSupportsImages: Bool { selectedModelInfo?.images ?? true }
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(messages) { MessageRow(message: $0, sessionId: sessionId) }
-                }
-                .padding(16)
+        chatBody
+            .background(Theme.bg)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { chatToolbar }
+            .sheet(isPresented: $showDiff) { DiffView(workspace: workspace) }
+            .sheet(isPresented: $showModelPicker) {
+                ModelPickerSheet(
+                    groups: api.modelGroups ?? HarnessModels.fallback,
+                    model: $model,
+                    thinking: $thinking,
+                    sessionModel: session?.model
+                )
             }
-            .defaultScrollAnchor(.bottom)
-            VStack(alignment: .leading, spacing: 9) {
-                if running { streamingBar }
-                composer
-                modelPill
+            .photosPicker(isPresented: $showPhotoPicker, selection: $photoItems, maxSelectionCount: 6, matching: .images)
+            .fullScreenCover(isPresented: $showCamera) {
+                CameraPicker(image: $cameraImage).ignoresSafeArea()
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 10)
-            .padding(.bottom, 8)
-            .overlay(alignment: .top) { Divider().overlay(Theme.separator) }
-        }
-        .background(Theme.bg)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(workspace.name)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Theme.text)
-                        .lineLimit(1)
-                    if let branch = workspace.branch {
-                        Text(branch)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(Theme.textMuted)
-                            .lineLimit(1)
+            .modifier(ChatOverlays(
+                alertMessage: $alertMessage,
+                showInstallApproval: $showInstallApproval,
+                showApprovalPrompt: $showApprovalPrompt,
+                pendingUI: pendingUI,
+                onInstallApproval: installApprovalExtension,
+                onAnswerUI: answerUI
+            ))
+            .onChange(of: photoItems) { _, items in
+                Task { await ingestPhotoItems(items) }
+            }
+            .onChange(of: cameraImage) { _, img in
+                if let img { addImage(img); cameraImage = nil }
+            }
+            .onChange(of: dictation.transcript) { _, text in
+                // Keep draft in sync even for the final recognition result,
+                // which may land in the same turn that flips isListening off.
+                if dictation.isListening { draft = text }
+            }
+            .onChange(of: dictation.isListening) { _, listening in
+                if !listening { draft = dictation.transcript }
+            }
+            .onChange(of: dictation.errorMessage) { _, msg in
+                if let msg { alertMessage = msg }
+            }
+            .task { await load() }
+            .task { await api.loadModelGroups() }
+            .refreshable { await load() }
+            // Drop the top-pin when leaving so re-entering lands at the bottom.
+            .onDisappear { endTurnPin() }
+    }
+
+    private var chatBody: some View {
+        ScrollView {
+            // Eager stack: LazyVStack + scrollPosition frequently lands on the
+            // wrong row while cells are still estimated.
+            VStack(alignment: .leading, spacing: 14) {
+                if let idx = turnStartIndex {
+                    // History above the turn (scroll up to read).
+                    ForEach(Array(messages.prefix(idx))) { message in
+                        MessageRow(message: message, sessionId: sessionId)
                     }
-                }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                if let stat = diffStat, !stat.isEmpty {
-                    Button { showDiff = true } label: {
-                        HStack(spacing: 4) {
-                            Text("+\(compactCount(stat.insertions))").foregroundStyle(Theme.green)
-                            Text("−\(compactCount(stat.deletions))").foregroundStyle(Color(red: 0.95, green: 0.57, blue: 0.56))
+
+                    // Stable turn frame: user message at the top, reply grows
+                    // down into the remaining viewport.
+                    VStack(alignment: .leading, spacing: 14) {
+                        ForEach(Array(messages.suffix(from: idx))) { message in
+                            MessageRow(message: message, sessionId: sessionId)
                         }
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .padding(.horizontal, 7).padding(.vertical, 4)
-                        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                        if running {
+                            HStack {
+                                Spacer(minLength: 60)
+                                Text(activity.isEmpty ? "Working…" : activity)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(Theme.textTertiary)
+                                    .lineLimit(1)
+                            }
+                            .padding(.trailing, 4)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: max(viewportHeight, 1), alignment: .top)
+                    .id(Self.activeTurnID)
+                } else {
+                    ForEach(messages) { message in
+                        MessageRow(message: message, sessionId: sessionId)
                     }
                 }
-            }
-            .sharedBackgroundVisibility(.hidden)
-            ToolbarItem(placement: .topBarTrailing) {
-                StatusBadge(status: workspace.status)
-            }
-            .sharedBackgroundVisibility(.hidden)   // drop iOS 26's glass capsule around the badge
-        }
-        .sheet(isPresented: $showDiff) { DiffView(workspace: workspace) }
-        .task { await load() }
-        .task { await api.loadModelGroups() }
-        .refreshable { await load() }
-    }
 
-    private var streamingBar: some View {
-        HStack(spacing: 9) {
-            ProgressView().controlSize(.small).tint(Theme.accent)
-            Text(activity.isEmpty ? "Working…" : activity)
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(Color(red: 0.63, green: 0.63, blue: 0.67))
-                .lineLimit(1)
-            Spacer()
-            Button {
-                Task { if let sessionId { try? await api.stop(sessionId: sessionId) } }
-            } label: {
-                HStack(spacing: 6) {
-                    RoundedRectangle(cornerRadius: 2).fill(Color(red: 0.97, green: 0.44, blue: 0.44)).frame(width: 8, height: 8)
-                    Text("Stop")
+                Color.clear
+                    .frame(height: 1)
+                    .id(Self.chatBottomID)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 16)
+            .padding(.bottom, 10)
+            .scrollTargetLayout()
+        }
+        .scrollPosition($scrollPosition)
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { _, height in
+            viewportHeight = height
+        }
+        .onScrollGeometryChange(for: Bool.self, of: { geo in
+            // visibleRect survives composer safeAreaInset; contentOffset math
+            // does not (it looks "above bottom" even when settled there).
+            let slack: CGFloat = 64
+            let viewable = geo.containerSize.height
+                - geo.contentInsets.top
+                - geo.contentInsets.bottom
+            if geo.contentSize.height <= viewable + slack { return true }
+            return geo.visibleRect.maxY >= geo.contentSize.height - slack
+        }, action: { _, atBottom in
+            isAtBottom = atBottom
+        })
+        .overlay(alignment: .bottomTrailing) {
+            if !isAtBottom, !messages.isEmpty {
+                Button(action: jumpToBottom) {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                        .frame(width: 40, height: 40)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
                 }
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color(red: 0.95, green: 0.63, blue: 0.63))
-                .padding(.horizontal, 12).padding(.vertical, 5)
-                .overlay(Capsule().strokeBorder(Color.white.opacity(0.13), lineWidth: 1))
+                .padding(.trailing, 18)
+                .padding(.bottom, 12)
+                .transition(.scale.combined(with: .opacity))
+                .accessibilityLabel("Scroll to bottom")
             }
         }
-        .padding(.horizontal, 4)
+        .animation(.easeOut(duration: 0.15), value: isAtBottom)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            composer
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+                .padding(.bottom, 8)
+                .overlay(alignment: .top) { Divider().overlay(Theme.separator) }
+                .background(Theme.bg)
+        }
     }
 
-    private var canSend: Bool { !draft.trimmingCharacters(in: .whitespaces).isEmpty && !running }
+    private func jumpToBottom() {
+        let hadPin = pinnedMessageId != nil
+        endTurnPin()
+        Task { @MainActor in
+            // Let the turn frame collapse before scrolling, otherwise "bottom"
+            // is still the empty filler under the pinned turn.
+            if hadPin {
+                await Task.yield()
+                try? await Task.sleep(for: .milliseconds(30))
+            }
+            scrollPosition.scrollTo(edge: .bottom)
+            await Task.yield()
+            scrollPosition.scrollTo(id: Self.chatBottomID, anchor: .bottom)
+        }
+    }
+
+    private func beginTurn(pinning messageId: String, content: String?) {
+        pinnedMessageId = messageId
+        pinnedContent = content
+        // Jump once to the stable turn frame (not a per-message id).
+        scrollPosition.scrollTo(id: Self.activeTurnID, anchor: .top)
+    }
+
+    /// Clears the ChatGPT-style top pin. Call when leaving the chat (or on
+    /// send failure) — not when a turn finishes, or short replies jump down.
+    private func endTurnPin() {
+        pinnedMessageId = nil
+        pinnedContent = nil
+        turnBaselineIds = []
+    }
+
+    /// Land on the latest messages after open/reload (pin must already be cleared).
+    private func scrollToLatest() {
+        Task { @MainActor in
+            await Task.yield()
+            scrollPosition.scrollTo(edge: .bottom)
+            await Task.yield()
+            scrollPosition.scrollTo(id: Self.chatBottomID, anchor: .bottom)
+            isAtBottom = true
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var chatToolbar: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(workspace.name)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                if let branch = workspace.branch {
+                    Text(branch)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.textMuted)
+                        .lineLimit(1)
+                }
+            }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            if let stat = diffStat, !stat.isEmpty {
+                Button { showDiff = true } label: {
+                    HStack(spacing: 4) {
+                        Text("+\(compactCount(stat.insertions))").foregroundStyle(Theme.green)
+                        Text("−\(compactCount(stat.deletions))").foregroundStyle(Color(red: 0.95, green: 0.57, blue: 0.56))
+                    }
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .padding(.horizontal, 7).padding(.vertical, 4)
+                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                }
+            }
+        }
+        .sharedBackgroundVisibility(.hidden)
+        ToolbarItem(placement: .topBarTrailing) {
+            StatusBadge(status: workspace.status)
+        }
+        .sharedBackgroundVisibility(.hidden)
+    }
+
+    private func installApprovalExtension() {
+        Task {
+            do {
+                try await api.installApprovalExtension()
+                approvalMode = .ask
+            } catch {
+                alertMessage = error.localizedDescription
+                approvalMode = .auto
+            }
+        }
+    }
+
+    private var canSend: Bool {
+        (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingImages.isEmpty) && !running
+    }
 
     private var composerPlaceholder: String {
-        running ? "Agent is working…" : "Message \(workspace.branch ?? workspace.name)"
-    }
-
-    private var modelPill: some View {
-        Menu {
-            // One submenu per provider — Menu drops Section titles on iOS 26,
-            // and providers like openrouter have hundreds of models.
-            ForEach(api.modelGroups ?? HarnessModels.fallback, id: \.title) { group in
-                Menu(group.title) {
-                    Picker(group.title, selection: $model) {
-                        ForEach(group.models, id: \.self) { m in
-                            Text(prettyModel(m)).tag(String?.some(m))
-                        }
-                    }
-                }
-            }
-        } label: {
-            HStack(spacing: 5) {
-                Text(prettyModel(model ?? session?.model))
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-                    .opacity(0.5)
-            }
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(Theme.textSecondary)
-            .padding(.horizontal, 11).padding(.vertical, 6)
-            .background(Color.white.opacity(0.06), in: Capsule())
-        }
+        "Ask \(prettyModel(selectedModelId))"
     }
 
     private var composer: some View {
-        HStack(spacing: 6) {
-            TextField(composerPlaceholder, text: $draft, axis: .vertical)
-                .lineLimit(1...5)
-                .font(.system(size: 14.5))
-                .foregroundStyle(Theme.text)
-                .padding(.horizontal, 12)
-                .onSubmit { send() }
-            Button(action: send) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(canSend ? Theme.bg : Theme.textMuted)
-                    .frame(width: 34, height: 34)
-                    .background(canSend ? Theme.accent : Color.white.opacity(0.07), in: Circle())
+        VStack(alignment: .leading, spacing: 10) {
+            if !pendingImages.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(pendingImages) { img in
+                            ZStack(alignment: .topTrailing) {
+                                Image(uiImage: img.image)
+                                    .resizable().scaledToFill()
+                                    .frame(width: 56, height: 56)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                                Button {
+                                    pendingImages.removeAll { $0.id == img.id }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 16))
+                                        .symbolRenderingMode(.palette)
+                                        .foregroundStyle(.white, .black.opacity(0.55))
+                                }
+                                .offset(x: 4, y: -4)
+                            }
+                        }
+                    }
+                }
             }
-            .disabled(!canSend)
+
+            TextField(composerPlaceholder, text: $draft, axis: .vertical)
+                .lineLimit(1...6)
+                .font(.system(size: 16))
+                .foregroundStyle(Theme.text)
+                .padding(.horizontal, 4)
+                .onSubmit { send() }
+
+            HStack(spacing: 14) {
+                plusButton
+                approvalButton
+                modelButton
+                Spacer(minLength: 0)
+                micButton
+                sendButton
+            }
         }
-        .padding(6)
-        .background(Color(red: 0.47, green: 0.47, blue: 0.5).opacity(0.13), in: RoundedRectangle(cornerRadius: 22))
-        .overlay(RoundedRectangle(cornerRadius: 22).strokeBorder(Color.white.opacity(0.13), lineWidth: 0.5))
+        .padding(.horizontal, 14)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
+        .background(Color(red: 0.12, green: 0.12, blue: 0.13), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
+    }
+
+    private var plusButton: some View {
+        Menu {
+            Button {
+                showPhotoPicker = true
+            } label: {
+                Label("Photo Library", systemImage: "photo.on.rectangle")
+            }
+            .disabled(!modelSupportsImages)
+            if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                Button {
+                    showCamera = true
+                } label: {
+                    Label("Take Photo", systemImage: "camera")
+                }
+                .disabled(!modelSupportsImages)
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(Theme.text)
+                .frame(width: 28, height: 28)
+        }
+    }
+
+    private var approvalButton: some View {
+        Menu {
+            Picker("Approval", selection: $approvalMode) {
+                ForEach(ApprovalMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+        } label: {
+            Image(systemName: approvalMode == .ask ? "exclamationmark.shield.fill" : "checkmark.shield")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(approvalMode == .ask
+                    ? Color(red: 0.95, green: 0.72, blue: 0.45)
+                    : Theme.textTertiary)
+                .frame(width: 28, height: 28)
+        }
+        .onChange(of: approvalMode) { _, mode in
+            guard mode == .ask else { return }
+            Task {
+                let installed = (try? await api.approvalExtensionStatus())?.installed ?? false
+                // Ask already works via bundled -e for phone turns; offer optional
+                // install so desktop `pi` sessions get the same gate.
+                if !installed { showInstallApproval = true }
+            }
+        }
+    }
+
+    private var modelButton: some View {
+        Button { showModelPicker = true } label: {
+            HStack(spacing: 5) {
+                Text(prettyModel(selectedModelId))
+                    .foregroundStyle(Theme.text)
+                if let thinking, modelSupportsThinking {
+                    Text(ThinkingLevel(rawValue: thinking)?.label ?? thinking.capitalized)
+                        .foregroundStyle(Theme.textTertiary)
+                }
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .font(.system(size: 14, weight: .medium))
+            .lineLimit(1)
+        }
+        .onChange(of: model) { _, newValue in
+            let info = HarnessModels.info(for: newValue ?? session?.model, in: api.modelGroups)
+            if info?.supportsThinking != true {
+                thinking = nil
+            } else if let thinking, !info!.thinkingLevels.contains(thinking) {
+                self.thinking = nil
+            }
+        }
+    }
+
+    private var micButton: some View {
+        Button {
+            dictation.toggle(into: &draft)
+        } label: {
+            Image(systemName: dictation.isListening ? "mic.fill" : "mic")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(dictation.isListening ? Theme.accent : Theme.text)
+                .frame(width: 28, height: 28)
+        }
+    }
+
+    private var sendButton: some View {
+        Button {
+            if running {
+                Task { if let sessionId { try? await api.stop(sessionId: sessionId) } }
+            } else {
+                send()
+            }
+        } label: {
+            ZStack {
+                if running {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(Color(red: 0.12, green: 0.12, blue: 0.13))
+                } else {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(canSend ? Color(red: 0.12, green: 0.12, blue: 0.13) : Theme.textMuted)
+                }
+            }
+            .frame(width: 34, height: 34)
+            .background(
+                running ? Theme.accent
+                    : (canSend ? Color.white : Color.white.opacity(0.08)),
+                in: Circle()
+            )
+        }
+        .disabled(!running && !canSend)
+        .accessibilityLabel(running ? "Stop" : "Send")
     }
 
     private func send() {
         guard canSend else { return }
-        let text = draft.trimmingCharacters(in: .whitespaces)
+        if dictation.isListening { dictation.stop() }
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let images = pendingImages.map {
+            PromptImage(data: $0.data.base64EncodedString(), mimeType: $0.mimeType)
+        }
+        let imageCount = images.count
         draft = ""
+        pendingImages = []
+        photoItems = []
+        // Drop any prior optimistic rows so image placeholders don't stack.
+        messages.removeAll { $0.id.hasPrefix("local-") }
+        turnBaselineIds = Set(messages.map(\.id))
+        // Show the user bubble immediately — refresh() remaps the pin to the
+        // server id. The turn frame id stays "active-turn" so nothing jumps.
+        // Image-only sends use a placeholder (server used to omit empty user
+        // text); both sides now emit "Photo" / "N Photos" for pinning.
+        let localId = "local-\(UUID().uuidString)"
+        let localContent = text.isEmpty
+            ? (imageCount == 1 ? "Photo" : "\(imageCount) Photos")
+            : text
+        messages.append(ChatMessage(
+            id: localId,
+            role: "user",
+            content: localContent,
+            createdAt: Date()
+        ))
+        beginTurn(pinning: localId, content: localContent)
         running = true
         Task {
             // A workspace with no chats yet has no session — create one on first send.
@@ -169,10 +506,28 @@ struct ChatView: View {
             }
             guard let sid else {
                 running = false
+                endTurnPin()
                 draft = text
+                messages.removeAll { $0.id.hasPrefix("local-") }
                 return
             }
-            try? await api.send(sessionId: sid, text: text, model: model)
+            do {
+                try await api.send(
+                    sessionId: sid,
+                    text: text,
+                    model: model,
+                    thinking: thinking,
+                    approvalMode: approvalMode.rawValue,
+                    images: images
+                )
+            } catch {
+                alertMessage = error.localizedDescription
+                running = false
+                endTurnPin()
+                draft = text
+                messages.removeAll { $0.id.hasPrefix("local-") }
+                return
+            }
             await refresh()
             await poll()
         }
@@ -186,19 +541,61 @@ struct ChatView: View {
             // ponytail: any failed status check stops polling; pull-to-refresh restarts it
             guard let status = try? await api.status(sessionId: sessionId) else {
                 running = false
+                pendingUI = nil
+                showApprovalPrompt = false
                 return
             }
             activity = status.activity
+            if let ui = status.pendingUI, pendingUI?.id != ui.id {
+                pendingUI = ui
+                showApprovalPrompt = true
+            }
             await refresh()
-            if !status.running { running = false }
+            if !status.running {
+                running = false
+                // Keep the active-turn frame and re-assert the scroll target so
+                // short replies don't settle near the composer. Bottom landing
+                // only happens after leaving the chat.
+                if pinnedMessageId != nil {
+                    scrollPosition.scrollTo(id: Self.activeTurnID, anchor: .top)
+                }
+                pendingUI = nil
+                showApprovalPrompt = false
+            }
         }
     }
 
+    private func answerUI(id: String, confirmed: Bool? = nil, value: String? = nil, cancelled: Bool? = nil) async {
+        guard let sessionId else { return }
+        showApprovalPrompt = false
+        pendingUI = nil
+        try? await api.respondUI(sessionId: sessionId, id: id, confirmed: confirmed, value: value, cancelled: cancelled)
+    }
+
+    private func addImage(_ image: UIImage) {
+        let rendered = image.resizedForUpload()
+        guard let data = rendered.jpegData(compressionQuality: 0.82) else { return }
+        pendingImages.append(PendingImage(image: rendered, mimeType: "image/jpeg", data: data))
+    }
+
+    private func ingestPhotoItems(_ items: [PhotosPickerItem]) async {
+        for item in items {
+            if let data = try? await item.loadTransferable(type: Data.self),
+               let image = UIImage(data: data) {
+                addImage(image)
+            }
+        }
+        photoItems = []
+    }
+
     private func load() async {
+        endTurnPin()
         sessions = (try? await api.sessions(workspaceId: workspace.id)) ?? sessions
         if session == nil { session = sessions.first }
         diffStat = try? await api.diffStat(workspaceId: workspace.id)
         await refresh()
+        // Opening a chat always shows the most recent messages.
+        scrollToLatest()
         if let sessionId, let status = try? await api.status(sessionId: sessionId), status.running {
             running = true
             activity = status.activity
@@ -208,7 +605,88 @@ struct ChatView: View {
 
     private func refresh() async {
         guard let sessionId else { return }
-        messages = (try? await api.messages(sessionId: sessionId)) ?? messages
+        let latest = (try? await api.messages(sessionId: sessionId)) ?? messages
+        // Keep the optimistic user row until a *new* server copy exists (same
+        // text as an older turn must not suppress or steal the pin).
+        let locals = messages.filter { $0.id.hasPrefix("local-") }
+        var merged = latest
+        for local in locals {
+            let hasNewCopy = merged.contains {
+                $0.role == "user"
+                    && $0.content == local.content
+                    && !turnBaselineIds.contains($0.id)
+            }
+            if !hasNewCopy { merged.append(local) }
+        }
+        messages = merged
+
+        if let pin = pinnedMessageId, !merged.contains(where: { $0.id == pin }) {
+            // Remap local-* → server id; turn frame id stays "active-turn".
+            if let content = pinnedContent,
+               let match = merged.last(where: {
+                   $0.role == "user" && $0.content == content && !turnBaselineIds.contains($0.id)
+               }) {
+                pinnedMessageId = match.id
+            }
+        }
+    }
+}
+
+private extension UIImage {
+    func resizedForUpload(maxDimension: CGFloat = 1600) -> UIImage {
+        let longest = max(size.width, size.height)
+        guard longest > maxDimension else { return self }
+        let scale = maxDimension / longest
+        let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+        let renderer = UIGraphicsImageRenderer(size: newSize)
+        return renderer.image { _ in draw(in: CGRect(origin: .zero, size: newSize)) }
+    }
+}
+
+private struct ChatOverlays: ViewModifier {
+    @Binding var alertMessage: String?
+    @Binding var showInstallApproval: Bool
+    @Binding var showApprovalPrompt: Bool
+    let pendingUI: PendingUI?
+    let onInstallApproval: () -> Void
+    let onAnswerUI: (String, Bool?, String?, Bool?) async -> Void
+
+    private var showError: Binding<Bool> {
+        Binding(get: { alertMessage != nil }, set: { if !$0 { alertMessage = nil } })
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .alert("Something went wrong", isPresented: showError) {
+                Button("OK", role: .cancel) { alertMessage = nil }
+            } message: {
+                Text(alertMessage ?? "")
+            }
+            .alert("Install approval extension?", isPresented: $showInstallApproval) {
+                Button("Install", action: onInstallApproval)
+                Button("Not Now", role: .cancel) {}
+            } message: {
+                Text("Ask mode already works for phone turns. Install the bundled extension if you also want the same confirmations in desktop pi.")
+            }
+            .confirmationDialog(
+                pendingUI?.title ?? "Allow tool?",
+                isPresented: $showApprovalPrompt,
+                titleVisibility: .visible
+            ) {
+                if let ui = pendingUI {
+                    if ui.method == "select", let options = ui.options {
+                        ForEach(options, id: \.self) { opt in
+                            Button(opt) { Task { await onAnswerUI(ui.id, nil, opt, nil) } }
+                        }
+                    } else {
+                        Button("Allow") { Task { await onAnswerUI(ui.id, true, nil, nil) } }
+                        Button("Deny", role: .destructive) { Task { await onAnswerUI(ui.id, false, nil, nil) } }
+                    }
+                    Button("Cancel", role: .cancel) { Task { await onAnswerUI(ui.id, nil, nil, true) } }
+                }
+            } message: {
+                Text(pendingUI?.message ?? "")
+            }
     }
 }
 
@@ -350,11 +828,7 @@ struct MessageRow: View {
         case "tool":
             ToolRow(content: message.content)
         default:
-            Text(LocalizedStringKey(message.content))
-                .font(.system(size: 14.5))
-                .foregroundStyle(Color(red: 0.84, green: 0.84, blue: 0.86))
-                .lineSpacing(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            MarkdownText(markdown: message.content)
                 .copyable(message.content)
         }
     }

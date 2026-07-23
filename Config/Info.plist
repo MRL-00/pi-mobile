@@ -21,5 +21,13 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Pi Mobile uses the microphone for voice dictation in the chat bar.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Pi Mobile turns your speech into text for chat messages.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Pi Mobile uses the camera to attach photos to messages.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Pi Mobile attaches photos from your library to messages.</string>
 </dict>
 </plist>

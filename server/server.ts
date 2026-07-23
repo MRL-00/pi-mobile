@@ -181,6 +181,14 @@ const textOf = (msg: any) =>
     .join("")
     .trim();
 
+const userImageBlocks = (msg: any) =>
+  (msg?.content ?? []).filter((b: any) =>
+    b?.type === "image" || b?.type === "image_url" || b?.type === "input_image"
+    || (typeof b?.mimeType === "string" && String(b.mimeType).startsWith("image/")));
+
+const userImageCount = (msg: any) => userImageBlocks(msg).length;
+const userHasImages = (msg: any) => userImageCount(msg) > 0;
+
 function sessionSummary(file: string, workspaceId: string) {
   const entries = readEntries(file);
   let title = "Untitled";
@@ -222,7 +230,19 @@ function displayMessages(sessionId: string) {
     if (msg.role === "user") {
       turnStart = new Date(e.timestamp).getTime();
       const t = textOf(msg);
-      if (t) out.push({ id: e.id, role: "user", content: t, created_at: createdAt });
+      if (t) {
+        out.push({ id: e.id, role: "user", content: t, created_at: createdAt });
+      } else if (userHasImages(msg)) {
+        // Image-only prompts have no text; still surface a row so the phone
+        // can pin the turn and show something in history.
+        const n = userImageCount(msg);
+        out.push({
+          id: e.id,
+          role: "user",
+          content: n === 1 ? "Photo" : `${n} Photos`,
+          created_at: createdAt,
+        });
+      }
     } else if (msg.role === "assistant") {
       for (const [i, b] of (msg.content ?? []).entries()) {
         if (b.type === "text" && b.text?.trim())
@@ -246,28 +266,132 @@ function displayMessages(sessionId: string) {
 }
 
 // ── Models ──────────────────────────────────────────────────────────────────
-// Pi's model catalog is first-class: `pi --list-models` prints provider/model
-// rows. Ids are "provider/model" and pass straight to `pi --model`.
-let modelCache: { title: string; models: string[] }[] = [];
-function refreshModels() {
-  try {
-    const p = Bun.spawnSync([PI, "--list-models"], { stdout: "pipe", stderr: "pipe" });
-    if (p.exitCode !== 0) return;
-    const groups = new Map<string, string[]>();
-    for (const line of p.stdout.toString().split("\n").slice(1)) {
-      const m = line.match(/^(\S+)\s+(\S+)/);
-      if (!m) continue;
-      const list = groups.get(m[1]) ?? [];
-      list.push(`${m[1]}/${m[2]}`);
-      groups.set(m[1], list);
+// Prefer Pi RPC `get_available_models` so we can expose each model's real
+// thinking-level set (same rules as Pi's getSupportedThinkingLevels). Falls
+// back to `pi --list-models` if RPC isn't available.
+type ModelInfo = { id: string; thinking: boolean; images: boolean; thinkingLevels: string[] };
+let modelCache: { title: string; models: ModelInfo[] }[] = [];
+
+const EXTENDED_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+function supportedThinkingLevels(model: { reasoning?: boolean; thinkingLevelMap?: Record<string, string | null> }) {
+  if (!model.reasoning) return [] as string[]; // no thinking control in the phone UI
+  return EXTENDED_THINKING_LEVELS.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
+}
+
+function refreshModelsFromList() {
+  const p = Bun.spawnSync([PI, "--list-models"], { stdout: "pipe", stderr: "pipe" });
+  if (p.exitCode !== 0) return false;
+  const groups = new Map<string, ModelInfo[]>();
+  for (const line of p.stdout.toString().split("\n").slice(1)) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 4) continue;
+    const [provider, modelId] = parts;
+    if (!provider || !modelId || provider === "provider") continue;
+    const images = parts[parts.length - 1] === "yes";
+    const reasoning = parts[parts.length - 2] === "yes";
+    // Coarse yes/no only — without a level map don't invent controls.
+    const thinkingLevels = reasoning ? ["off", "minimal", "low", "medium", "high"] : [];
+    const list = groups.get(provider) ?? [];
+    list.push({
+      id: `${provider}/${modelId}`,
+      thinking: thinkingLevels.length > 0,
+      images,
+      thinkingLevels,
+    });
+    groups.set(provider, list);
+  }
+  if (!groups.size) return false;
+  modelCache = [...groups].map(([title, models]) => ({ title, models }));
+  return true;
+}
+
+async function refreshModelsFromRpc() {
+  // Keep stdin open until the response arrives (closing early makes pi exit
+  // before answering). Ignore fire-and-forget extension_ui_request noise.
+  const proc = Bun.spawn([PI, "--mode", "rpc", "--no-session"], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  proc.stdin.write(JSON.stringify({ id: "models", type: "get_available_models" }) + "\n");
+  proc.stdin.flush();
+
+  const dec = new TextDecoder();
+  let buf = "";
+  const apply = (models: any[]) => {
+    const groups = new Map<string, ModelInfo[]>();
+    for (const m of models) {
+      const provider = m.provider ?? "unknown";
+      const thinkingLevels = supportedThinkingLevels(m);
+      const list = groups.get(provider) ?? [];
+      list.push({
+        id: `${provider}/${m.id}`,
+        thinking: thinkingLevels.length > 0,
+        images: Array.isArray(m.input) && m.input.includes("image"),
+        thinkingLevels,
+      });
+      groups.set(provider, list);
     }
-    if (groups.size) modelCache = [...groups].map(([title, models]) => ({ title, models }));
-  } catch {
-    // pi missing from PATH — keep whatever cache we have; phone falls back to static list
+    if (!groups.size) return false;
+    modelCache = [...groups].map(([title, ms]) => ({ title, models: ms }));
+    return true;
+  };
+
+  try {
+    const result = await Promise.race([
+      (async () => {
+        for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
+          buf += dec.decode(chunk, { stream: true });
+          const lines = buf.split("\n");
+          buf = lines.pop()!;
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            let ev: any;
+            try { ev = JSON.parse(line); } catch { continue; }
+            if (ev.type === "response" && ev.command === "get_available_models" && ev.success) {
+              return apply(ev.data?.models ?? []);
+            }
+          }
+        }
+        return false;
+      })(),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 15_000)),
+    ]);
+    return result;
+  } finally {
+    try { proc.stdin.end(); } catch {}
+    proc.kill();
   }
 }
-refreshModels();
-setInterval(refreshModels, 10 * 60_000);
+
+async function refreshModels() {
+  try {
+    if (await refreshModelsFromRpc()) return;
+    refreshModelsFromList();
+  } catch {
+    try { refreshModelsFromList(); } catch {
+      // pi missing from PATH — keep whatever cache we have; phone falls back to static list
+    }
+  }
+}
+await refreshModels();
+setInterval(() => { void refreshModels(); }, 10 * 60_000);
+
+// Bundled Ask-mode gate (also installable via POST /approval-extension/install).
+const approvalExt = resolve(import.meta.dir, "pi-mobile-approval/extension.ts");
+const approvalPkg = resolve(import.meta.dir, "pi-mobile-approval");
+const approvalInstalled = () => {
+  try {
+    const settings = JSON.parse(readFileSync(`${homedir()}/.pi/agent/settings.json`, "utf8"));
+    const pkgs: string[] = settings.packages ?? [];
+    return pkgs.some((p) => p.includes("pi-mobile-approval") || resolve(p) === approvalExt || resolve(p) === approvalPkg);
+  } catch { return false; }
+};
 
 // ── Pi version ──────────────────────────────────────────────────────────────
 // Same contract Pi's own CLI uses (`pi.dev/api/latest-version`). Surfaces an
@@ -380,10 +504,28 @@ function createWorkspace(repoId: string) {
 }
 
 // ── Running turns via Pi RPC ────────────────────────────────────────────────
-type Turn = { proc: ReturnType<typeof Bun.spawn> | null; running: boolean; activity: string; cwd: string };
+type PendingUI = {
+  id: string;
+  method: string;
+  title?: string;
+  message?: string;
+  options?: string[];
+};
+type PromptImage = { data: string; mimeType: string };
+type Turn = {
+  proc: ReturnType<typeof Bun.spawn> | null;
+  running: boolean;
+  activity: string;
+  cwd: string;
+  pendingUI: PendingUI | null;
+};
 const turns = new Map<string, Turn>();
 
-function sendMessage(sessionId: string, text: string, model?: string) {
+function sendMessage(
+  sessionId: string,
+  text: string,
+  opts: { model?: string; thinking?: string; approvalMode?: string; images?: PromptImage[] } = {},
+) {
   const existing = turns.get(sessionId);
   if (existing?.running) return { error: "agent is already working", status: 409 };
 
@@ -392,17 +534,54 @@ function sendMessage(sessionId: string, text: string, model?: string) {
   if (!cwd) return { error: "session not found", status: 404 };
   if (!existsSync(cwd)) return { error: "workspace directory not found on this Mac", status: 400 };
 
+  const approvalMode = (opts.approvalMode ?? "auto").toLowerCase() === "ask" ? "ask" : "auto";
   const args = [PI, "--mode", "rpc"];
   if (found) args.push("--session", found.file);
   else args.push("--session-id", sessionId);
-  if (model) args.push("--model", model);
+  if (opts.model) args.push("--model", opts.model);
+  if (opts.thinking) args.push("--thinking", opts.thinking);
+  // Ask must fail closed — never start a turn that looks like Ask without the gate.
+  if (approvalMode === "ask") {
+    if (!existsSync(approvalExt)) {
+      return { error: "Ask mode requires the bundled approval extension (re-run server/install.sh)", status: 500 };
+    }
+    args.push("-e", approvalExt);
+  }
 
-  const turn: Turn = { proc: null, running: true, activity: "Starting agent…", cwd };
+  // Leave activity empty so the phone shows its "Working…" placeholder until
+  // the first real Pi event (Thinking… / tool name) arrives.
+  const turn: Turn = { proc: null, running: true, activity: "", cwd, pendingUI: null };
   turns.set(sessionId, turn);
-  const proc = Bun.spawn(args, { cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  let proc: ReturnType<typeof Bun.spawn>;
+  try {
+    proc = Bun.spawn(args, {
+      cwd,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, PI_MOBILE_APPROVAL_MODE: approvalMode },
+    });
+  } catch (e) {
+    turns.delete(sessionId);
+    return { error: `failed to start pi: ${String(e)}`, status: 500 };
+  }
   turn.proc = proc;
-  proc.stdin.write(JSON.stringify({ id: "1", type: "prompt", message: text }) + "\n");
-  proc.stdin.flush();
+  const images = (opts.images ?? [])
+    .filter((img) => img?.data && img?.mimeType)
+    .map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+  try {
+    proc.stdin.write(JSON.stringify({
+      id: "1",
+      type: "prompt",
+      message: text,
+      ...(images.length ? { images } : {}),
+    }) + "\n");
+    proc.stdin.flush();
+  } catch (e) {
+    try { proc.kill(); } catch {}
+    turns.delete(sessionId);
+    return { error: `failed to send prompt: ${String(e)}`, status: 500 };
+  }
 
   (async () => {
     let buf = "";
@@ -414,13 +593,24 @@ function sendMessage(sessionId: string, text: string, model?: string) {
         if (!line.trim()) continue;
         let ev: any;
         try { ev = JSON.parse(line); } catch { continue; }
-        if (ev.type === "tool_execution_start")
+        if (ev.type === "extension_ui_request" && (ev.method === "confirm" || ev.method === "select")) {
+          turn.pendingUI = {
+            id: ev.id,
+            method: ev.method,
+            title: ev.title,
+            message: ev.message,
+            options: ev.options,
+          };
+          turn.activity = ev.title ?? "Waiting for approval…";
+        } else if (ev.type === "tool_execution_start") {
+          turn.pendingUI = null;
           turn.activity = `${ev.toolName ?? "tool"} ${summarizeInput(ev.args)}`;
-        else if (ev.type === "message_start" && ev.message?.role === "assistant")
+        } else if (ev.type === "message_start" && ev.message?.role === "assistant")
           turn.activity = "Thinking…";
         else if (ev.type === "response" && ev.success === false)
           turn.activity = `⚠️ ${ev.error ?? "command failed"}`;
         else if (ev.type === "agent_end") {
+          turn.pendingUI = null;
           proc.stdin.end();
           proc.kill(); // pi stays resident waiting for more commands; the turn is done
         }
@@ -430,8 +620,31 @@ function sendMessage(sessionId: string, text: string, model?: string) {
     pendingSessions.delete(sessionId); // it's on disk now
     turn.running = false;
     turn.activity = "";
+    turn.pendingUI = null;
   })();
 
+  return { ok: true };
+}
+
+function respondUI(sessionId: string, body: any) {
+  const turn = turns.get(sessionId);
+  if (!turn?.running || !turn.proc?.stdin) return { error: "no active turn", status: 404 };
+  if (!turn.pendingUI || (body.id && body.id !== turn.pendingUI.id))
+    return { error: "no pending approval", status: 409 };
+  const id = body.id ?? turn.pendingUI.id;
+  let payload: Record<string, unknown> = { type: "extension_ui_response", id };
+  if (body.cancelled) payload.cancelled = true;
+  else if (turn.pendingUI.method === "confirm") payload.confirmed = !!body.confirmed;
+  else if (body.value !== undefined) payload.value = body.value;
+  else payload.cancelled = true;
+  try {
+    turn.proc.stdin.write(JSON.stringify(payload) + "\n");
+    turn.proc.stdin.flush();
+  } catch {
+    return { error: "failed to write response", status: 500 };
+  }
+  turn.pendingUI = null;
+  turn.activity = "Continuing…";
   return { ok: true };
 }
 
@@ -497,10 +710,28 @@ Bun.serve({
     let m: RegExpMatchArray | null;
     try {
       if (req.method === "POST" && (m = path.match(/^\/sessions\/([^/]+)\/send$/))) {
-        const { text, model } = await req.json();
-        if (!text?.trim()) return Response.json({ error: "empty message" }, { status: 400 });
-        const r = sendMessage(m[1], text.trim(), model);
+        const { text, model, thinking, approvalMode, images } = await req.json();
+        const hasImages = Array.isArray(images) && images.length > 0;
+        if (!text?.trim() && !hasImages) return Response.json({ error: "empty message" }, { status: 400 });
+        const r = sendMessage(m[1], (text ?? "").trim(), { model, thinking, approvalMode, images });
         return Response.json(r, { status: "status" in r ? (r.status as number) : 200 });
+      }
+      if (req.method === "POST" && (m = path.match(/^\/sessions\/([^/]+)\/ui-response$/))) {
+        const r = respondUI(m[1], await req.json());
+        return Response.json(r, { status: "status" in r ? (r.status as number) : 200 });
+      }
+      if (path === "/approval-extension") {
+        return Response.json({ installed: approvalInstalled(), path: approvalPkg });
+      }
+      if (req.method === "POST" && path === "/approval-extension/install") {
+        if (!existsSync(approvalPkg))
+          return Response.json({ error: "bundled approval package missing" }, { status: 500 });
+        const p = Bun.spawnSync([PI, "install", approvalPkg], { stdout: "pipe", stderr: "pipe" });
+        if (p.exitCode !== 0)
+          return Response.json({
+            error: p.stderr.toString().trim() || p.stdout.toString().trim() || "install failed",
+          }, { status: 500 });
+        return Response.json({ ok: true, installed: true });
       }
       // Deleting a chat moves its session file to ~/.pi-companion/trash (recoverable).
       if (req.method === "DELETE" && (m = path.match(/^\/sessions\/([^/]+)$/))) {
@@ -582,7 +813,11 @@ Bun.serve({
       }
       if ((m = path.match(/^\/sessions\/([^/]+)\/status$/))) {
         const t = turns.get(m[1]);
-        return Response.json({ running: !!t?.running, activity: t?.activity ?? "" });
+        return Response.json({
+          running: !!t?.running,
+          activity: t?.activity ?? "",
+          pending_ui: t?.pendingUI ?? null,
+        });
       }
       if (path === "/models") return Response.json(modelCache);
       if (path === "/pi-version") return Response.json(piVersionCache);

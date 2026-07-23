@@ -22,11 +22,28 @@ BUN="$(command -v bun || echo "$HOME/.bun/bin/bun")"
 
 mkdir -p "$LOG_DIR" "$HOME/Library/LaunchAgents"
 
-# Running via `curl | bash` (no server.ts beside this script)? Download it.
-if [[ ! -f "$DIR/server.ts" ]]; then
-  DIR="$LOG_DIR"
+# Always install into ~/.pi-companion so LaunchAgent has a stable path, and so
+# checkout updates (server.ts + approval extension) are picked up on reinstall.
+REPO_RAW="https://raw.githubusercontent.com/MRL-00/pi-mobile/main/server"
+if [[ -f "$DIR/server.ts" ]]; then
+  cp "$DIR/server.ts" "$LOG_DIR/server.ts"
+  if [[ -d "$DIR/pi-mobile-approval" ]]; then
+    rm -rf "$LOG_DIR/pi-mobile-approval"
+    cp -R "$DIR/pi-mobile-approval" "$LOG_DIR/pi-mobile-approval"
+  fi
+else
   echo "Downloading server.ts…"
-  curl -fsSL "https://raw.githubusercontent.com/MRL-00/pi-mobile/main/server/server.ts" -o "$DIR/server.ts"
+  curl -fsSL "$REPO_RAW/server.ts" -o "$LOG_DIR/server.ts"
+  echo "Downloading pi-mobile-approval…"
+  mkdir -p "$LOG_DIR/pi-mobile-approval"
+  curl -fsSL "$REPO_RAW/pi-mobile-approval/extension.ts" -o "$LOG_DIR/pi-mobile-approval/extension.ts"
+  curl -fsSL "$REPO_RAW/pi-mobile-approval/package.json" -o "$LOG_DIR/pi-mobile-approval/package.json"
+fi
+DIR="$LOG_DIR"
+# Ask mode fails closed without this package — don't launch a half-installed agent.
+if [[ ! -f "$DIR/pi-mobile-approval/extension.ts" || ! -f "$DIR/pi-mobile-approval/package.json" ]]; then
+  echo "error: pi-mobile-approval package missing in $DIR (needed for Ask mode)." >&2
+  exit 1
 fi
 
 # caffeinate -s keeps the Mac awake (on AC power) so agents can run while you're away
