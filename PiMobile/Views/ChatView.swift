@@ -11,6 +11,7 @@ struct PendingImage: Identifiable {
 
 struct ChatView: View {
     @Environment(APIClient.self) private var api
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let workspace: Workspace
     @State private var messages: [ChatMessage] = []
     @State private var draft = ""
@@ -446,23 +447,50 @@ struct ChatView: View {
             }
         } label: {
             ZStack {
+                if running, reduceMotion {
+                    Circle()
+                        .stroke(Theme.accent.opacity(0.5), lineWidth: 2)
+                        .frame(width: 34, height: 34)
+                        .allowsHitTesting(false)
+                } else if running {
+                    TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { context in
+                        // Wrap time to keep Float precision. 10π is a whole number of
+                        // periods for the shader's 2.6 (13τ) and 4.0 (20τ) rates, so
+                        // the animation phase is continuous across the wrap.
+                        let t = Float(context.date.timeIntervalSinceReferenceDate
+                            .truncatingRemainder(dividingBy: 10 * .pi))
+                        // Circle host (not a rect) so the shader can't paint square corners.
+                        Circle()
+                            .fill(Color.black)
+                            .colorEffect(
+                                ShaderLibrary.busyRing(
+                                    .boundingRect,
+                                    .float(t),
+                                    .color(Theme.accent)
+                                )
+                            )
+                            .frame(width: 36, height: 36)
+                            .allowsHitTesting(false)
+                    }
+                }
+
+                Circle()
+                    .fill(running || canSend ? Color.white : Color.white.opacity(0.08))
+                    .frame(width: running ? 28 : 34, height: running ? 28 : 34)
+
                 if running {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(Color(red: 0.12, green: 0.12, blue: 0.13))
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color(red: 0.12, green: 0.12, blue: 0.13))
                 } else {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(canSend ? Color(red: 0.12, green: 0.12, blue: 0.13) : Theme.textMuted)
                 }
             }
-            .frame(width: 34, height: 34)
-            .background(
-                running ? Theme.accent
-                    : (canSend ? Color.white : Color.white.opacity(0.08)),
-                in: Circle()
-            )
+            .frame(width: running ? 36 : 34, height: running ? 36 : 34)
         }
+        .buttonStyle(.plain)
         .disabled(!running && !canSend)
         .accessibilityLabel(running ? "Stop" : "Send")
     }
