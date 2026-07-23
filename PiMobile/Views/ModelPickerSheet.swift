@@ -85,6 +85,9 @@ struct ModelPickerSheet: View {
         Binding(
             get: { isSearching || expanded.contains(title) },
             set: { isExpanded in
+                // Search forces sections open visually; don't let taps during
+                // search rewrite the pre-search expanded set.
+                guard !isSearching else { return }
                 if isExpanded {
                     expanded.insert(title)
                 } else {
