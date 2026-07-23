@@ -42,8 +42,6 @@ struct ChatView: View {
     /// Server message ids present when the current send started — used so
     /// optimistic rows / image pins don't latch onto an older same-text turn.
     @State private var turnBaselineIds: Set<String> = []
-    /// Image-only sends have no optimistic row; pin once a *new* user message appears.
-    @State private var awaitingNewUserPin = false
     @State private var scrollPosition = ScrollPosition(idType: String.self)
     @State private var viewportHeight: CGFloat = 560
     @State private var isAtBottom = true
@@ -232,8 +230,18 @@ struct ChatView: View {
     private func endTurnPin() {
         pinnedMessageId = nil
         pinnedContent = nil
-        awaitingNewUserPin = false
         turnBaselineIds = []
+    }
+
+    /// Land on the latest messages after open/reload (pin must already be cleared).
+    private func scrollToLatest() {
+        Task { @MainActor in
+            await Task.yield()
+            scrollPosition.scrollTo(edge: .bottom)
+            await Task.yield()
+            scrollPosition.scrollTo(id: Self.chatBottomID, anchor: .bottom)
+            isAtBottom = true
+        }
     }
 
     @ToolbarContentBuilder
@@ -465,27 +473,28 @@ struct ChatView: View {
         let images = pendingImages.map {
             PromptImage(data: $0.data.base64EncodedString(), mimeType: $0.mimeType)
         }
+        let imageCount = images.count
         draft = ""
         pendingImages = []
         photoItems = []
-        turnBaselineIds = Set(messages.filter { !$0.id.hasPrefix("local-") }.map(\.id))
+        // Drop any prior optimistic rows so image placeholders don't stack.
+        messages.removeAll { $0.id.hasPrefix("local-") }
+        turnBaselineIds = Set(messages.map(\.id))
         // Show the user bubble immediately — refresh() remaps the pin to the
         // server id. The turn frame id stays "active-turn" so nothing jumps.
-        if !text.isEmpty {
-            let localId = "local-\(UUID().uuidString)"
-            messages.append(ChatMessage(
-                id: localId,
-                role: "user",
-                content: text,
-                createdAt: Date()
-            ))
-            awaitingNewUserPin = false
-            beginTurn(pinning: localId, content: text)
-        } else {
-            // Image-only: wait for a user row that wasn't already on the server.
-            awaitingNewUserPin = true
-            pinnedContent = nil
-        }
+        // Image-only sends use a placeholder (server used to omit empty user
+        // text); both sides now emit "Photo" / "N Photos" for pinning.
+        let localId = "local-\(UUID().uuidString)"
+        let localContent = text.isEmpty
+            ? (imageCount == 1 ? "Photo" : "\(imageCount) Photos")
+            : text
+        messages.append(ChatMessage(
+            id: localId,
+            role: "user",
+            content: localContent,
+            createdAt: Date()
+        ))
+        beginTurn(pinning: localId, content: localContent)
         running = true
         Task {
             // A workspace with no chats yet has no session — create one on first send.
@@ -580,10 +589,13 @@ struct ChatView: View {
     }
 
     private func load() async {
+        endTurnPin()
         sessions = (try? await api.sessions(workspaceId: workspace.id)) ?? sessions
         if session == nil { session = sessions.first }
         diffStat = try? await api.diffStat(workspaceId: workspace.id)
         await refresh()
+        // Opening a chat always shows the most recent messages.
+        scrollToLatest()
         if let sessionId, let status = try? await api.status(sessionId: sessionId), status.running {
             running = true
             activity = status.activity
@@ -608,11 +620,7 @@ struct ChatView: View {
         }
         messages = merged
 
-        if awaitingNewUserPin,
-           let lastUser = merged.last(where: { $0.role == "user" && !turnBaselineIds.contains($0.id) }) {
-            beginTurn(pinning: lastUser.id, content: lastUser.content)
-            awaitingNewUserPin = false
-        } else if let pin = pinnedMessageId, !merged.contains(where: { $0.id == pin }) {
+        if let pin = pinnedMessageId, !merged.contains(where: { $0.id == pin }) {
             // Remap local-* → server id; turn frame id stays "active-turn".
             if let content = pinnedContent,
                let match = merged.last(where: {

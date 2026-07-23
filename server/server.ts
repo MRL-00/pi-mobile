@@ -181,6 +181,14 @@ const textOf = (msg: any) =>
     .join("")
     .trim();
 
+const userImageBlocks = (msg: any) =>
+  (msg?.content ?? []).filter((b: any) =>
+    b?.type === "image" || b?.type === "image_url" || b?.type === "input_image"
+    || (typeof b?.mimeType === "string" && String(b.mimeType).startsWith("image/")));
+
+const userImageCount = (msg: any) => userImageBlocks(msg).length;
+const userHasImages = (msg: any) => userImageCount(msg) > 0;
+
 function sessionSummary(file: string, workspaceId: string) {
   const entries = readEntries(file);
   let title = "Untitled";
@@ -222,7 +230,19 @@ function displayMessages(sessionId: string) {
     if (msg.role === "user") {
       turnStart = new Date(e.timestamp).getTime();
       const t = textOf(msg);
-      if (t) out.push({ id: e.id, role: "user", content: t, created_at: createdAt });
+      if (t) {
+        out.push({ id: e.id, role: "user", content: t, created_at: createdAt });
+      } else if (userHasImages(msg)) {
+        // Image-only prompts have no text; still surface a row so the phone
+        // can pin the turn and show something in history.
+        const n = userImageCount(msg);
+        out.push({
+          id: e.id,
+          role: "user",
+          content: n === 1 ? "Photo" : `${n} Photos`,
+          created_at: createdAt,
+        });
+      }
     } else if (msg.role === "assistant") {
       for (const [i, b] of (msg.content ?? []).entries()) {
         if (b.type === "text" && b.text?.trim())
