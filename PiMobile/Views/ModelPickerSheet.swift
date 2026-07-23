@@ -8,8 +8,14 @@ struct ModelPickerSheet: View {
     var sessionModel: String?
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
+    /// Provider sections the user has expanded. Empty = all collapsed.
+    @State private var expanded = Set<String>()
 
     private var selectedId: String? { model ?? sessionModel }
+
+    private var isSearching: Bool {
+        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     private var filtered: [ModelGroup] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -44,41 +50,17 @@ struct ModelPickerSheet: View {
                 }
 
                 ForEach(filtered, id: \.title) { group in
-                    Section(group.title) {
-                        ForEach(group.models) { m in
-                            Button {
-                                model = m.id
-                                if !m.supportsThinking {
-                                    thinking = nil
-                                } else if let thinking, !m.thinkingLevels.contains(thinking) {
-                                    self.thinking = nil
-                                }
-                            } label: {
-                                HStack(spacing: 10) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(prettyModel(m.id))
-                                            .font(.system(size: 15, weight: .medium))
-                                            .foregroundStyle(Theme.text)
-                                        Text(m.id)
-                                            .font(.system(size: 11, design: .monospaced))
-                                            .foregroundStyle(Theme.textMuted)
-                                            .lineLimit(1)
-                                    }
-                                    Spacer()
-                                    if m.supportsThinking {
-                                        Text("Think")
-                                            .font(.system(size: 10, weight: .semibold))
-                                            .foregroundStyle(Theme.textTertiary)
-                                            .padding(.horizontal, 6).padding(.vertical, 2)
-                                            .background(Color.white.opacity(0.06), in: Capsule())
-                                    }
-                                    if m.id == selectedId {
-                                        Image(systemName: "checkmark")
-                                            .font(.system(size: 13, weight: .semibold))
-                                            .foregroundStyle(Theme.accent)
-                                    }
-                                }
+                    Section {
+                        DisclosureGroup(
+                            isExpanded: expansionBinding(for: group.title)
+                        ) {
+                            ForEach(group.models) { m in
+                                modelRow(m)
                             }
+                        } label: {
+                            Text(group.title)
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(Theme.text)
                         }
                     }
                 }
@@ -97,6 +79,58 @@ struct ModelPickerSheet: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    private func expansionBinding(for title: String) -> Binding<Bool> {
+        Binding(
+            get: { isSearching || expanded.contains(title) },
+            set: { isExpanded in
+                // Search forces sections open visually; don't let taps during
+                // search rewrite the pre-search expanded set.
+                guard !isSearching else { return }
+                if isExpanded {
+                    expanded.insert(title)
+                } else {
+                    expanded.remove(title)
+                }
+            }
+        )
+    }
+
+    private func modelRow(_ m: ModelInfo) -> some View {
+        Button {
+            model = m.id
+            if !m.supportsThinking {
+                thinking = nil
+            } else if let thinking, !m.thinkingLevels.contains(thinking) {
+                self.thinking = nil
+            }
+        } label: {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(prettyModel(m.id))
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(Theme.text)
+                    Text(m.id)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.textMuted)
+                        .lineLimit(1)
+                }
+                Spacer()
+                if m.supportsThinking {
+                    Text("Think")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.textTertiary)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.white.opacity(0.06), in: Capsule())
+                }
+                if m.id == selectedId {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                }
+            }
+        }
     }
 
     private func thinkingRow(label: String, value: String?) -> some View {
