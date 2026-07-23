@@ -17,10 +17,18 @@ struct Workspace: Identifiable, Codable, Hashable {
     let repositoryId: String
     let name: String
     let branch: String?
-    let status: String      // in-progress | waiting | done etc. (derived_status)
+    var status: String      // not-started | in-progress | done (derived live on server + client)
     let unread: Bool
     let lastMessageSnippet: String?
     let updatedAt: Date
+}
+
+struct SkillInfo: Identifiable, Codable, Hashable {
+    let name: String
+    let description: String
+    let command: String     // "/skill:name" for Pi RPC prompt expansion
+
+    var id: String { name }
 }
 
 struct ChatSession: Identifiable, Codable, Hashable {

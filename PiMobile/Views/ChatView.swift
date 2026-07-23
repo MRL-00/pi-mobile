@@ -13,6 +13,7 @@ struct ChatView: View {
     @Environment(APIClient.self) private var api
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let workspace: Workspace
+    @State private var liveStatus: String
     @State private var messages: [ChatMessage] = []
     @State private var draft = ""
     @State private var sessions: [ChatSession] = []
@@ -22,7 +23,7 @@ struct ChatView: View {
     private var sessionId: String? { session?.id }
     @State private var running = false
     @State private var activity = ""
-    @State private var model: String?   // Pi "provider/model" id; nil = session default
+    @State private var model: String?   // Pi "provider/model" id; nil = session default / last used
     @State private var thinking: String? = nil  // nil = Pi default
     @State private var approvalMode: ApprovalMode = .auto
     @State private var pendingImages: [PendingImage] = []
@@ -36,6 +37,12 @@ struct ChatView: View {
     @State private var pendingUI: PendingUI?
     @State private var showApprovalPrompt = false
     @State private var showModelPicker = false
+    @State private var showSkillPicker = false
+
+    init(workspace: Workspace) {
+        self.workspace = workspace
+        _liveStatus = State(initialValue: workspace.status)
+    }
     /// Active turn starts at this user message; a stable "active-turn" frame
     /// keeps it at the top while the reply grows underneath.
     @State private var pinnedMessageId: String?
@@ -73,8 +80,13 @@ struct ChatView: View {
                     groups: api.modelGroups ?? HarnessModels.fallback,
                     model: $model,
                     thinking: $thinking,
-                    sessionModel: session?.model
+                    sessionModel: session?.model ?? api.lastUsedModel
                 )
+            }
+            .sheet(isPresented: $showSkillPicker) {
+                SkillPickerSheet(skills: api.skills) { skill in
+                    insertSkill(skill)
+                }
             }
             .photosPicker(isPresented: $showPhotoPicker, selection: $photoItems, maxSelectionCount: 6, matching: .images)
             .fullScreenCover(isPresented: $showCamera) {
@@ -106,7 +118,16 @@ struct ChatView: View {
                 if let msg { alertMessage = msg }
             }
             .task { await load() }
-            .task { await api.loadModelGroups() }
+            .task {
+                await api.loadModelGroups()
+                await api.loadSkills()
+                // New / empty sessions should open on the last model the user picked,
+                // not Pi's global default.
+                if model == nil, session?.model == nil, let last = api.lastUsedModel {
+                    model = last
+                    if thinking == nil { thinking = api.lastUsedThinking }
+                }
+            }
             .refreshable { await load() }
             // Drop the top-pin when leaving so re-entering lands at the bottom.
             .onDisappear { endTurnPin() }
@@ -277,7 +298,7 @@ struct ChatView: View {
         }
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .topBarTrailing) {
-            StatusBadge(status: workspace.status)
+            StatusBadge(status: liveStatus)
         }
         .sharedBackgroundVisibility(.hidden)
     }
@@ -337,6 +358,7 @@ struct ChatView: View {
 
             HStack(spacing: 14) {
                 plusButton
+                skillButton
                 approvalButton
                 modelButton
                 Spacer(minLength: 0)
@@ -367,11 +389,51 @@ struct ChatView: View {
                 }
                 .disabled(!modelSupportsImages)
             }
+            if !api.skills.isEmpty {
+                Divider()
+                Button {
+                    showSkillPicker = true
+                } label: {
+                    Label("Skill…", systemImage: "sparkles")
+                }
+            }
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(Theme.text)
                 .frame(width: 28, height: 28)
+        }
+    }
+
+    private var skillButton: some View {
+        Button {
+            showSkillPicker = true
+        } label: {
+            Image(systemName: "sparkles")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(api.skills.isEmpty ? Theme.textMuted : Theme.text)
+                .frame(width: 28, height: 28)
+        }
+        .disabled(api.skills.isEmpty)
+        .accessibilityLabel("Skills")
+    }
+
+    /// Prepend `/skill:name` so Pi RPC expands the skill before the agent turn.
+    private func insertSkill(_ skill: SkillInfo) {
+        let cmd = skill.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cmd.isEmpty else { return }
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            draft = "\(cmd) "
+        } else if trimmed.hasPrefix("/") {
+            // Replace a leading slash-command, keep the rest of the prompt.
+            if let space = trimmed.firstIndex(of: " ") {
+                draft = "\(cmd)\(trimmed[space...])"
+            } else {
+                draft = "\(cmd) "
+            }
+        } else {
+            draft = "\(cmd) \(trimmed)"
         }
     }
 
@@ -424,6 +486,8 @@ struct ChatView: View {
             } else if let thinking, !info!.thinkingLevels.contains(thinking) {
                 self.thinking = nil
             }
+            // "Last used" persists on send(), not here — load() also assigns
+            // `model` when hydrating an existing session, which is not a pick.
         }
     }
 
@@ -525,6 +589,11 @@ struct ChatView: View {
         ))
         beginTurn(pinning: localId, content: localContent)
         running = true
+        liveStatus = "in-progress"
+        // Prefer an explicit pick, else last-used, so new sessions don't fall through to Default.
+        let sendModel = model ?? session?.model ?? api.lastUsedModel
+        let sendThinking = thinking ?? (sendModel == api.lastUsedModel ? api.lastUsedThinking : nil)
+        api.rememberModel(sendModel, thinking: sendThinking)
         Task {
             // A workspace with no chats yet has no session — create one on first send.
             var sid = sessionId
@@ -535,6 +604,7 @@ struct ChatView: View {
             }
             guard let sid else {
                 running = false
+                liveStatus = messages.count > 1 ? "done" : "not-started"
                 endTurnPin()
                 draft = text
                 messages.removeAll { $0.id.hasPrefix("local-") }
@@ -544,14 +614,15 @@ struct ChatView: View {
                 try await api.send(
                     sessionId: sid,
                     text: text,
-                    model: model,
-                    thinking: thinking,
+                    model: sendModel,
+                    thinking: sendThinking,
                     approvalMode: approvalMode.rawValue,
                     images: images
                 )
             } catch {
                 alertMessage = error.localizedDescription
                 running = false
+                liveStatus = messages.contains(where: { !$0.id.hasPrefix("local-") }) ? "done" : "not-started"
                 endTurnPin()
                 draft = text
                 messages.removeAll { $0.id.hasPrefix("local-") }
@@ -564,17 +635,26 @@ struct ChatView: View {
 
     private func poll() async {
         guard let sessionId else { return }
+        var failures = 0
         while running {
             try? await Task.sleep(for: .seconds(1.5))
             if Task.isCancelled { return }
-            // ponytail: any failed status check stops polling; pull-to-refresh restarts it
+            // Transient errors (network blip, companion restart) shouldn't flip the
+            // badge to Done while Pi may still be working — retry, then just stop
+            // polling and leave the status as-is; pull-to-refresh restarts it.
             guard let status = try? await api.status(sessionId: sessionId) else {
-                running = false
-                pendingUI = nil
-                showApprovalPrompt = false
-                return
+                failures += 1
+                if failures >= 4 {
+                    running = false
+                    pendingUI = nil
+                    showApprovalPrompt = false
+                    return
+                }
+                continue
             }
+            failures = 0
             activity = status.activity
+            liveStatus = status.running ? "in-progress" : liveStatus
             if let ui = status.pendingUI, pendingUI?.id != ui.id {
                 pendingUI = ui
                 showApprovalPrompt = true
@@ -582,6 +662,7 @@ struct ChatView: View {
             await refresh()
             if !status.running {
                 running = false
+                liveStatus = "done"
                 // Keep the active-turn frame and re-assert the scroll target so
                 // short replies don't settle near the composer. Bottom landing
                 // only happens after leaving the chat.
@@ -621,14 +702,29 @@ struct ChatView: View {
         endTurnPin()
         sessions = (try? await api.sessions(workspaceId: workspace.id)) ?? sessions
         if session == nil { session = sessions.first }
+        // Hydrate composer model from session, else last-used on this phone.
+        if model == nil {
+            model = session?.model ?? api.lastUsedModel
+            if thinking == nil, model == api.lastUsedModel || session?.model == nil {
+                thinking = api.lastUsedThinking
+            }
+        }
+        if sessions.isEmpty && !running {
+            liveStatus = "not-started"
+        } else if !running {
+            liveStatus = workspace.status == "in-progress" ? "done" : workspace.status
+        }
         diffStat = try? await api.diffStat(workspaceId: workspace.id)
         await refresh()
         // Opening a chat always shows the most recent messages.
         scrollToLatest()
         if let sessionId, let status = try? await api.status(sessionId: sessionId), status.running {
             running = true
+            liveStatus = "in-progress"
             activity = status.activity
             await poll()
+        } else if !running {
+            liveStatus = messages.isEmpty ? "not-started" : "done"
         }
     }
 

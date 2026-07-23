@@ -84,12 +84,43 @@ final class APIClient {
     // The Mac owning whatever repo the user is currently inside. Navigation is a
     // single flow, so one active Mac at a time is enough.
     var activeMac: MacServer? {
-        didSet { if oldValue?.id != activeMac?.id { modelGroups = nil } }
+        didSet {
+            if oldValue?.id != activeMac?.id {
+                modelGroups = nil
+                skills = []
+            }
+        }
     }
     // Picker groups from the active Mac's /models; nil until fetched (views fall
     // back to HarnessModels.fallback). Cleared on Mac switch so one Mac's models
     // never show for another.
     var modelGroups: [ModelGroup]?
+    // Installed skills from the active Mac's pi (`/skills`); empty until fetched.
+    var skills: [SkillInfo] = []
+
+    /// Last model the user picked on this phone — reused for new sessions.
+    var lastUsedModel: String? {
+        get { UserDefaults.standard.string(forKey: "lastUsedModel") }
+        set {
+            if let newValue, !newValue.isEmpty {
+                UserDefaults.standard.set(newValue, forKey: "lastUsedModel")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "lastUsedModel")
+            }
+        }
+    }
+
+    /// Optional last thinking level paired with lastUsedModel.
+    var lastUsedThinking: String? {
+        get { UserDefaults.standard.string(forKey: "lastUsedThinking") }
+        set {
+            if let newValue, !newValue.isEmpty {
+                UserDefaults.standard.set(newValue, forKey: "lastUsedThinking")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "lastUsedThinking")
+            }
+        }
+    }
 
     init() {
         if let data = UserDefaults.standard.data(forKey: "macs"),
@@ -183,6 +214,19 @@ final class APIClient {
            activeMac?.id == mac.id {
             modelGroups = groups
         }
+    }
+
+    func loadSkills() async {
+        guard let mac = activeMac else { return }
+        if let list: [SkillInfo] = try? await get("/skills", on: mac),
+           activeMac?.id == mac.id {
+            skills = list
+        }
+    }
+
+    func rememberModel(_ model: String?, thinking: String?) {
+        if let model, !model.isEmpty { lastUsedModel = model }
+        lastUsedThinking = thinking
     }
 
     func workspaces(repoId: String) async throws -> [Workspace] { try await get("/repos/\(repoId)/workspaces") }
