@@ -4,10 +4,49 @@ struct SettingsView: View {
     @Environment(APIClient.self) private var api
     @Environment(\.dismiss) private var dismiss
     @State private var statuses: [UUID: Bool] = [:]
+    @State private var piVersions: [UUID: PiVersionInfo] = [:]
+
+    private var macsNeedingPiUpdate: [(mac: MacServer, info: PiVersionInfo)] {
+        api.macs.compactMap { mac in
+            guard let info = piVersions[mac.id], info.updateAvailable else { return nil }
+            return (mac, info)
+        }
+    }
 
     var body: some View {
         NavigationStack {
             Form {
+                if !macsNeedingPiUpdate.isEmpty {
+                    Section {
+                        ForEach(macsNeedingPiUpdate, id: \.mac.id) { item in
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("\(item.mac.name) is on Pi \(item.info.current ?? "?"); \(item.info.latest ?? "?") is available.")
+                                    .font(.subheadline)
+                                HStack {
+                                    Text(item.info.updateCommand)
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(Theme.accent)
+                                        .textSelection(.enabled)
+                                    Spacer()
+                                    Button {
+                                        UIPasteboard.general.string = item.info.updateCommand
+                                    } label: {
+                                        Image(systemName: "doc.on.doc")
+                                    }
+                                    .buttonStyle(.borderless)
+                                }
+                                .padding(10)
+                                .background(Theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    } header: {
+                        Text("Update Pi")
+                    } footer: {
+                        Text("Run this in Terminal on that Mac — Pi updates there, not in this app.")
+                    }
+                }
+
                 Section("Macs") {
                     ForEach(api.macs) { mac in
                         NavigationLink {
@@ -24,9 +63,15 @@ struct SettingsView: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Text(statuses[mac.id] == true ? "Online" : "Offline")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                if piVersions[mac.id]?.updateAvailable == true {
+                                    Text("Update Pi")
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.champagne)
+                                } else {
+                                    Text(statuses[mac.id] == true ? "Online" : "Offline")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }
@@ -121,6 +166,10 @@ struct SettingsView: View {
     private func checkStatuses() async {
         for mac in api.macs {
             statuses[mac.id] = (try? await api.repos(on: mac)) != nil
+            // Older companions won't have /pi-version; treat that as "no prompt".
+            if let info = try? await api.piVersion(on: mac) {
+                piVersions[mac.id] = info
+            }
         }
     }
 }
