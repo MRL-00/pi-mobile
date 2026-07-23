@@ -67,6 +67,14 @@ struct WorkspacesView: View {
             api.activeMac = api.mac(withId: repo.macId)
             await load()
         }
+        // Live status badges — poll quietly so send/finish doesn't require pull-to-refresh.
+        .task(id: repo.id) {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                if Task.isCancelled { return }
+                await loadQuiet()
+            }
+        }
     }
 
     private var header: some View {
@@ -115,6 +123,22 @@ struct WorkspacesView: View {
 
     private func load() async {
         workspaces = (try? await api.workspaces(repoId: repo.id)) ?? []
+        loaded = true
+    }
+
+    /// Background refresh for status badges; ignore failures so offline doesn't wipe the list.
+    private func loadQuiet() async {
+        guard let latest = try? await api.workspaces(repoId: repo.id) else { return }
+        // Preserve order when ids match so the list doesn't jump during a poll.
+        if latest.map({ $0.id }) == workspaces.map({ $0.id }) {
+            for i in workspaces.indices {
+                if let next = latest.first(where: { $0.id == workspaces[i].id }) {
+                    workspaces[i] = next
+                }
+            }
+        } else {
+            workspaces = latest
+        }
         loaded = true
     }
 }

@@ -28,7 +28,9 @@ struct StatusStyle {
         case "done": self.init(label: "Done", color: Theme.sage, pulses: false)
         case "in-review": self.init(label: "In review", color: Theme.lilac, pulses: true)
         case "in-progress": self.init(label: "In progress", color: Theme.champagne, pulses: true)
-        default: self.init(label: "New", color: Color(red: 0.63, green: 0.63, blue: 0.67), pulses: false)
+        case "not-started", "new":
+            self.init(label: "Not started", color: Color(red: 0.63, green: 0.63, blue: 0.67), pulses: false)
+        default: self.init(label: "Not started", color: Color(red: 0.63, green: 0.63, blue: 0.67), pulses: false)
         }
     }
 

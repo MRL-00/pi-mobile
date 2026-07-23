@@ -265,6 +265,37 @@ function displayMessages(sessionId: string) {
   return out;
 }
 
+// Bun LaunchAgent has a minimal env; give pi the same HOME/PATH a login shell would,
+// so ~/.pi/agent/skills and package skills resolve the same as desktop pi.
+function nodeBins(): string[] {
+  const nvm = `${homedir()}/.nvm/versions/node`;
+  try {
+    return readdirSync(nvm)
+      .filter((v) => existsSync(`${nvm}/${v}/bin/node`))
+      .sort()
+      .reverse()
+      .map((v) => `${nvm}/${v}/bin`);
+  } catch {
+    return [];
+  }
+}
+function piEnv(extra: Record<string, string> = {}): Record<string, string> {
+  const pathParts = [
+    `${homedir()}/.local/bin`,
+    `${homedir()}/.bun/bin`,
+    ...nodeBins(),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    process.env.PATH ?? "",
+  ].filter(Boolean);
+  return {
+    ...process.env as Record<string, string>,
+    HOME: process.env.HOME || homedir(),
+    PATH: pathParts.join(":"),
+    ...extra,
+  };
+}
+
 // ── Models ──────────────────────────────────────────────────────────────────
 // Prefer Pi RPC `get_available_models` so we can expose each model's real
 // thinking-level set (same rules as Pi's getSupportedThinkingLevels). Falls
@@ -284,7 +315,7 @@ function supportedThinkingLevels(model: { reasoning?: boolean; thinkingLevelMap?
 }
 
 function refreshModelsFromList() {
-  const p = Bun.spawnSync([PI, "--list-models"], { stdout: "pipe", stderr: "pipe" });
+  const p = Bun.spawnSync([PI, "--list-models"], { stdout: "pipe", stderr: "pipe", env: piEnv() });
   if (p.exitCode !== 0) return false;
   const groups = new Map<string, ModelInfo[]>();
   for (const line of p.stdout.toString().split("\n").slice(1)) {
@@ -317,6 +348,7 @@ async function refreshModelsFromRpc() {
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
+    env: piEnv(),
   });
   proc.stdin.write(JSON.stringify({ id: "models", type: "get_available_models" }) + "\n");
   proc.stdin.flush();
@@ -381,6 +413,65 @@ async function refreshModels() {
 }
 await refreshModels();
 setInterval(() => { void refreshModels(); }, 10 * 60_000);
+
+// ── Skills (global + package; same discovery Pi uses in RPC) ────────────────
+type SkillInfo = { name: string; description: string; command: string };
+let skillCache: SkillInfo[] = [];
+
+async function refreshSkills() {
+  const proc = Bun.spawn([PI, "--mode", "rpc", "--no-session"], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+    env: piEnv(),
+  });
+  proc.stdin.write(JSON.stringify({ id: "skills", type: "get_commands" }) + "\n");
+  proc.stdin.flush();
+
+  const dec = new TextDecoder();
+  let buf = "";
+  try {
+    await Promise.race([
+      (async () => {
+        for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
+          buf += dec.decode(chunk, { stream: true });
+          const lines = buf.split("\n");
+          buf = lines.pop()!;
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            let ev: any;
+            try { ev = JSON.parse(line); } catch { continue; }
+            if (ev.type === "response" && ev.command === "get_commands" && ev.success) {
+              const cmds = (ev.data?.commands ?? []) as any[];
+              skillCache = cmds
+                .filter((c) => c.source === "skill" || String(c.name ?? "").startsWith("skill:"))
+                .map((c) => {
+                  const command = String(c.name ?? "");
+                  const name = command.startsWith("skill:") ? command.slice("skill:".length) : command;
+                  return {
+                    name,
+                    command: `/skill:${name}`,
+                    description: String(c.description ?? "").trim(),
+                  };
+                })
+                .sort((a, b) => a.name.localeCompare(b.name));
+              return true;
+            }
+          }
+        }
+        return false;
+      })(),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 15_000)),
+    ]);
+  } catch {
+    // keep last good list
+  } finally {
+    try { proc.stdin.end(); } catch {}
+    proc.kill();
+  }
+}
+await refreshSkills();
+setInterval(() => { void refreshSkills(); }, 10 * 60_000);
 
 // Bundled Ask-mode gate (also installable via POST /approval-extension/install).
 const approvalExt = resolve(import.meta.dir, "pi-mobile-approval/extension.ts");
@@ -499,7 +590,7 @@ function createWorkspace(repoId: string) {
   rememberCwd(path, label);
   scanCache = null;
   const id = encodeCwd(path);
-  return { id, repository_id: repoId, name: label, branch, status: "done", unread: false,
+  return { id, repository_id: repoId, name: label, branch, status: "not-started", unread: false,
            updated_at: new Date().toISOString(), last_message_snippet: null, session: createSession(id) };
 }
 
@@ -559,7 +650,8 @@ function sendMessage(
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, PI_MOBILE_APPROVAL_MODE: approvalMode },
+      // HOME + richer PATH so installed skills/packages match desktop pi.
+      env: piEnv({ PI_MOBILE_APPROVAL_MODE: approvalMode }),
     });
   } catch (e) {
     turns.delete(sessionId);
@@ -677,6 +769,13 @@ const repos = () => {
     .sort((a, b) => a.name.localeCompare(b.name));
 };
 
+function workspaceStatus(ws: Ws): string {
+  if ([...turns.values()].some((t) => t.running && t.cwd === ws.cwd)) return "in-progress";
+  // Fresh workspaces / no sessions on disk yet — not “done”, just waiting for first send.
+  if (!ws.dir || ws.sessionCount === 0) return "not-started";
+  return "done";
+}
+
 const workspacesOf = (repoId: string) => {
   const { workspaces, repoOf } = scanned();
   return [...workspaces]
@@ -688,7 +787,7 @@ const workspacesOf = (repoId: string) => {
         repository_id: repoId,
         name: workspaceLabel(ws.cwd),
         branch: git(ws.cwd, "branch", "--show-current"),
-        status: [...turns.values()].some((t) => t.running && t.cwd === ws.cwd) ? "in-progress" : "done",
+        status: workspaceStatus(ws),
         unread: false,
         updated_at: new Date(ws.mtime).toISOString(),
         last_message_snippet: newest ? sessionSummary(`${ws.dir}/${newest}`, id).title : null,
@@ -836,6 +935,7 @@ Bun.serve({
         });
       }
       if (path === "/models") return Response.json(modelCache);
+      if (path === "/skills") return Response.json(skillCache);
       if (path === "/pi-version") return Response.json(piVersionCache);
       if (path === "/repos") return Response.json(repos());
       if ((m = path.match(/^\/repos\/([^/]+)\/workspaces$/))) return Response.json(workspacesOf(m[1]));
