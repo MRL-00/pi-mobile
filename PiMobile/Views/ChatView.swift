@@ -11,6 +11,7 @@ struct PendingImage: Identifiable {
 
 struct ChatView: View {
     @Environment(APIClient.self) private var api
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let workspace: Workspace
     @State private var messages: [ChatMessage] = []
     @State private var draft = ""
@@ -446,11 +447,18 @@ struct ChatView: View {
             }
         } label: {
             ZStack {
-                if running {
+                if running, reduceMotion {
+                    Circle()
+                        .stroke(Theme.accent.opacity(0.5), lineWidth: 2)
+                        .frame(width: 34, height: 34)
+                        .allowsHitTesting(false)
+                } else if running {
                     TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { context in
-                        // Wrap time so it stays small enough for Float precision in the shader.
+                        // Wrap time to keep Float precision. 10π is a whole number of
+                        // periods for the shader's 2.6 (13τ) and 4.0 (20τ) rates, so
+                        // the animation phase is continuous across the wrap.
                         let t = Float(context.date.timeIntervalSinceReferenceDate
-                            .truncatingRemainder(dividingBy: 3600))
+                            .truncatingRemainder(dividingBy: 10 * .pi))
                         // Circle host (not a rect) so the shader can't paint square corners.
                         Circle()
                             .fill(Color.black)
