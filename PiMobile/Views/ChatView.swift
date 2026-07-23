@@ -485,10 +485,8 @@ struct ChatView: View {
             } else if let thinking, !info!.thinkingLevels.contains(thinking) {
                 self.thinking = nil
             }
-            if let newValue { api.rememberModel(newValue, thinking: thinking) }
-        }
-        .onChange(of: thinking) { _, newValue in
-            api.rememberModel(model ?? session?.model ?? api.lastUsedModel, thinking: newValue)
+            // "Last used" persists on send(), not here — load() also assigns
+            // `model` when hydrating an existing session, which is not a pick.
         }
     }
 
@@ -609,17 +607,24 @@ struct ChatView: View {
 
     private func poll() async {
         guard let sessionId else { return }
+        var failures = 0
         while running {
             try? await Task.sleep(for: .seconds(1.5))
             if Task.isCancelled { return }
-            // ponytail: any failed status check stops polling; pull-to-refresh restarts it
+            // Transient errors (network blip, companion restart) shouldn't flip the
+            // badge to Done while Pi may still be working — retry, then just stop
+            // polling and leave the status as-is; pull-to-refresh restarts it.
             guard let status = try? await api.status(sessionId: sessionId) else {
-                running = false
-                liveStatus = "done"
-                pendingUI = nil
-                showApprovalPrompt = false
-                return
+                failures += 1
+                if failures >= 4 {
+                    running = false
+                    pendingUI = nil
+                    showApprovalPrompt = false
+                    return
+                }
+                continue
             }
+            failures = 0
             activity = status.activity
             liveStatus = status.running ? "in-progress" : liveStatus
             if let ui = status.pendingUI, pendingUI?.id != ui.id {
