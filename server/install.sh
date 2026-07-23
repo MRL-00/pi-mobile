@@ -7,6 +7,8 @@ LABEL="co.bungy.pi-companion"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$HOME/.pi-companion"
+# LaunchAgents don't inherit your shell PATH — include where bun/pi usually live.
+AGENT_PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
   launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
@@ -42,6 +44,11 @@ cat > "$PLIST" <<EOF
     <string>run</string>
     <string>$DIR/server.ts</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>$AGENT_PATH</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>$LOG_DIR/server.log</string>
@@ -52,7 +59,27 @@ EOF
 
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
 : > "$LOG_DIR/server.log"
+: > "$LOG_DIR/server.err.log"
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
-sleep 3
+
+# Wait for the server to print its pairing banner (QR + token).
+for _ in $(seq 1 20); do
+  if grep -q "Auth token:" "$LOG_DIR/server.log" 2>/dev/null; then break; fi
+  if grep -q "listening on" "$LOG_DIR/server.log" 2>/dev/null; then break; fi
+  sleep 0.5
+done
+
 echo "Installed and running. Logs: $LOG_DIR/server.log"
-cat "$LOG_DIR/server.log"   # address, token, and pairing QR (scan with the iPhone camera)
+if [[ -s "$LOG_DIR/server.log" ]]; then
+  cat "$LOG_DIR/server.log"
+else
+  echo
+  echo "Server didn't print a banner yet — check $LOG_DIR/server.err.log"
+  if [[ -f "$LOG_DIR/token" ]]; then
+    HOST="$(scutil --get LocalHostName 2>/dev/null || hostname | sed 's/\.local$//')"
+    echo
+    echo "Pair manually in the iPhone app Settings:"
+    echo "  Server address:  http://${HOST}.local:8940"
+    echo "  Auth token:      $(cat "$LOG_DIR/token")"
+  fi
+fi

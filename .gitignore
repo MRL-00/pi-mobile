@@ -5,3 +5,7 @@ DerivedData/
 node_modules/
 .clawpatch/
 build/
+
+# Conductor local overrides (machine-specific)
+.conductor/settings.local.toml
+.conductor/settings.local.json
