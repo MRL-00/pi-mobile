@@ -16,7 +16,9 @@ Pi is a terminal agent, so this app pairs a small companion server on your Mac (
 - **Full chat history** — messages, thinking blocks, tool calls, inline images
 - **Send messages** — continue any session from your phone; because the phone and the terminal share the same session file, `pi -c` on the Mac picks up exactly where you left off — no restarts, no forked conversations
 - **New sessions & workspaces** — start a fresh session, or spin up a new git worktree, from the phone
-- **Model picker** — Pi's full model catalog (15+ providers), switchable per-send, mid-session
+- **Model picker** — Pi's full model catalog (15+ providers), switchable per-send, mid-session, with optional thinking level
+- **Ask approval mode** — confirm tool calls on the phone (Auto stays the default; Ask loads a bundled Pi extension)
+- **Photos & dictation** — attach images and dictate into the composer
 - **Diffs** — review each workspace's uncommitted/branch changes on your phone
 
 ## How it works
@@ -55,7 +57,7 @@ Open `PiMobile.xcodeproj` in Xcode (26+), build to your device (iOS 26+). Then e
 
 ## Caveats
 
-- Turns started from the phone run with Pi's default tool permissions — there's no remote approval UI yet.
+- Turns default to **Auto** tool permissions. **Ask** mode confirms each tool on the phone via the bundled `server/pi-mobile-approval` extension (loaded for that turn; optional `pi install` for desktop use too).
 - A session that's open in a terminal `pi` and driven from the phone at the same time can race; finish one before the other (Pi's file format keeps history safe either way).
 - Session titles are derived from the first user message (Pi sessions have no title field).
 

@@ -150,12 +150,13 @@ final class APIClient {
         return try decoder.decode(T.self, from: data)
     }
 
-    private func post(_ path: String, body: [String: String] = [:]) async throws -> Data {
+    private func post(_ path: String, body: some Encodable) async throws -> Data {
         guard let mac = activeMac, let url = URL(string: mac.baseURL + path) else { throw APIError.badURL }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(mac.token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Request bodies stay camelCase to match the companion server's JSON.
         request.httpBody = try JSONEncoder().encode(body)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
@@ -166,6 +167,10 @@ final class APIClient {
             throw APIError.server(status: http.statusCode, message: message)
         }
         return data
+    }
+
+    private func post(_ path: String) async throws -> Data {
+        try await post(path, body: [String: String]())
     }
 
     func repos(on mac: MacServer) async throws -> [Repo] { try await get("/repos", on: mac) }
@@ -186,13 +191,59 @@ final class APIClient {
     func diff(workspaceId: String) async throws -> WorkspaceDiff { try await get("/workspaces/\(workspaceId)/diff") }
     func diffStat(workspaceId: String) async throws -> DiffStat { try await get("/workspaces/\(workspaceId)/diffstat") }
 
-    func send(sessionId: String, text: String, model: String? = nil) async throws {
-        var body = ["text": text]
-        if let model { body["model"] = model }
+    struct SendBody: Encodable {
+        var text: String
+        var model: String?
+        var thinking: String?
+        var approvalMode: String?
+        var images: [PromptImage]?
+    }
+
+    func send(
+        sessionId: String,
+        text: String,
+        model: String? = nil,
+        thinking: String? = nil,
+        approvalMode: String? = nil,
+        images: [PromptImage]? = nil
+    ) async throws {
+        let body = SendBody(
+            text: text,
+            model: model,
+            thinking: thinking,
+            approvalMode: approvalMode,
+            images: images?.isEmpty == false ? images : nil
+        )
         _ = try await post("/sessions/\(sessionId)/send", body: body)
     }
 
     func stop(sessionId: String) async throws { _ = try await post("/sessions/\(sessionId)/stop") }
+
+    struct UIResponseBody: Encodable {
+        var id: String
+        var confirmed: Bool?
+        var value: String?
+        var cancelled: Bool?
+    }
+
+    func respondUI(sessionId: String, id: String, confirmed: Bool? = nil, value: String? = nil, cancelled: Bool? = nil) async throws {
+        _ = try await post(
+            "/sessions/\(sessionId)/ui-response",
+            body: UIResponseBody(id: id, confirmed: confirmed, value: value, cancelled: cancelled)
+        )
+    }
+
+    struct ApprovalExtensionStatus: Codable {
+        let installed: Bool
+    }
+
+    func approvalExtensionStatus() async throws -> ApprovalExtensionStatus {
+        try await get("/approval-extension")
+    }
+
+    func installApprovalExtension() async throws {
+        _ = try await post("/approval-extension/install")
+    }
 
     private func delete(_ path: String) async throws {
         guard let mac = activeMac, let url = URL(string: mac.baseURL + path) else { throw URLError(.badURL) }

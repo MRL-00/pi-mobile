@@ -36,19 +36,115 @@ struct ChatSession: Identifiable, Codable, Hashable {
 
 // One picker section per Pi provider; ids are "provider/model" and pass
 // straight through to `pi --model`.
+struct ModelInfo: Codable, Hashable, Identifiable {
+    let id: String
+    let thinking: Bool
+    let images: Bool
+    /// Pi thinking levels this model actually accepts (empty → hide thinking UI).
+    let thinkingLevels: [String]
+
+    var supportsThinking: Bool { thinking && !thinkingLevels.isEmpty }
+
+    init(id: String, thinking: Bool = false, images: Bool = true, thinkingLevels: [String] = []) {
+        self.id = id
+        self.thinking = thinking
+        self.images = images
+        self.thinkingLevels = thinkingLevels
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        images = try c.decodeIfPresent(Bool.self, forKey: .images) ?? true
+        let levels = try c.decodeIfPresent([String].self, forKey: .thinkingLevels) ?? []
+        if !levels.isEmpty {
+            thinkingLevels = levels
+            thinking = try c.decodeIfPresent(Bool.self, forKey: .thinking) ?? true
+        } else {
+            // Legacy servers only sent a boolean — don't invent a full level list.
+            thinking = try c.decodeIfPresent(Bool.self, forKey: .thinking) ?? false
+            thinkingLevels = thinking ? ["off", "minimal", "low", "medium", "high"] : []
+        }
+    }
+}
+
 struct ModelGroup: Codable, Hashable {
     let title: String
-    let models: [String]
+    let models: [ModelInfo]
+
+    init(title: String, models: [ModelInfo]) {
+        self.title = title
+        self.models = models
+    }
+
+    // Accept both the new [{id,thinking,images}] shape and the legacy [string] shape
+    // so an older companion server still populates the full catalog.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = try c.decode(String.self, forKey: .title)
+        if let infos = try? c.decode([ModelInfo].self, forKey: .models) {
+            models = infos
+        } else if let ids = try? c.decode([String].self, forKey: .models) {
+            models = ids.map { ModelInfo(id: $0) }
+        } else {
+            models = []
+        }
+    }
+}
+
+enum ThinkingLevel: String, CaseIterable, Identifiable {
+    case off, minimal, low, medium, high, xhigh, max
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .off: return "Off"
+        case .minimal: return "Minimal"
+        case .low: return "Low"
+        case .medium: return "Medium"
+        case .high: return "High"
+        case .xhigh: return "XHigh"
+        case .max: return "Max"
+        }
+    }
+}
+
+enum ApprovalMode: String, CaseIterable, Identifiable {
+    case auto, ask
+    var id: String { rawValue }
+    var label: String { self == .auto ? "Auto" : "Ask" }
 }
 
 // The live groups come from the server's /models (Pi's own model catalog).
 // This static list is only the fallback before the fetch lands.
 enum HarnessModels {
     static let fallback: [ModelGroup] = [
-        ModelGroup(title: "anthropic", models: ["anthropic/claude-fable-5", "anthropic/claude-opus-4-8",
-                                                "anthropic/claude-sonnet-5", "anthropic/claude-haiku-4-5"]),
-        ModelGroup(title: "openai-codex", models: ["openai-codex/gpt-5.6-sol", "openai-codex/gpt-5.5", "openai-codex/gpt-5.4"]),
+        ModelGroup(title: "anthropic", models: [
+            ModelInfo(id: "anthropic/claude-fable-5", thinking: true,
+                      thinkingLevels: ["minimal", "low", "medium", "high", "xhigh", "max"]),
+            ModelInfo(id: "anthropic/claude-opus-4-8", thinking: true,
+                      thinkingLevels: ["off", "minimal", "low", "medium", "high", "max"]),
+            ModelInfo(id: "anthropic/claude-sonnet-5", thinking: true,
+                      thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
+            ModelInfo(id: "anthropic/claude-haiku-4-5", thinking: true,
+                      thinkingLevels: ["off", "minimal", "low", "medium", "high"]),
+        ]),
+        ModelGroup(title: "openai-codex", models: [
+            ModelInfo(id: "openai-codex/gpt-5.6-sol", thinking: true,
+                      thinkingLevels: ["off", "low", "medium", "high", "xhigh", "max"]),
+            ModelInfo(id: "openai-codex/gpt-5.5", thinking: true,
+                      thinkingLevels: ["off", "low", "medium", "high", "xhigh"]),
+            ModelInfo(id: "openai-codex/gpt-5.4", thinking: true,
+                      thinkingLevels: ["off", "low", "medium", "high", "xhigh"]),
+        ]),
     ]
+
+    static func info(for id: String?, in groups: [ModelGroup]?) -> ModelInfo? {
+        guard let id else { return nil }
+        for g in groups ?? fallback {
+            if let m = g.models.first(where: { $0.id == id }) { return m }
+        }
+        return nil
+    }
 }
 
 func prettyModel(_ model: String?) -> String {
@@ -91,9 +187,23 @@ struct FolderListing: Codable {
     let dirs: [String]
 }
 
+struct PendingUI: Codable, Hashable {
+    let id: String
+    let method: String
+    let title: String?
+    let message: String?
+    let options: [String]?
+}
+
 struct AgentStatus: Codable {
     let running: Bool
     let activity: String
+    var pendingUI: PendingUI? = nil
+}
+
+struct PromptImage: Codable, Hashable {
+    let data: String      // base64
+    let mimeType: String
 }
 
 struct ChatMessage: Identifiable, Codable, Hashable {
