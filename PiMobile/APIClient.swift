@@ -169,6 +169,7 @@ final class APIClient {
     }
 
     func repos(on mac: MacServer) async throws -> [Repo] { try await get("/repos", on: mac) }
+    func piVersion(on mac: MacServer) async throws -> PiVersionInfo { try await get("/pi-version", on: mac) }
 
     func loadModelGroups() async {
         // Keep the last good list on failure (older server without /models, offline).
