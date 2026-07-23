@@ -144,7 +144,9 @@ final class SpeechDictation {
                         self.transcript = self.baseText + (needsSpace ? " " : "") + spoken
                     }
                     if result.isFinal {
-                        self.stop()
+                        // Defer stop so observers see the final transcript while
+                        // isListening is still true (ChatView only syncs then).
+                        Task { @MainActor in self.stop() }
                     }
                 }
 

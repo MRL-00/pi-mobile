@@ -463,32 +463,48 @@ function sendMessage(
   else args.push("--session-id", sessionId);
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinking) args.push("--thinking", opts.thinking);
-  // Always load the bundled gate for Ask turns so confirm UI works without a
-  // prior install; install endpoint is for users who also want it in desktop pi.
-  if (approvalMode === "ask" && existsSync(approvalExt)) args.push("-e", approvalExt);
+  // Ask must fail closed — never start a turn that looks like Ask without the gate.
+  if (approvalMode === "ask") {
+    if (!existsSync(approvalExt)) {
+      return { error: "Ask mode requires the bundled approval extension (re-run server/install.sh)", status: 500 };
+    }
+    args.push("-e", approvalExt);
+  }
 
   // Leave activity empty so the phone shows its "Working…" placeholder until
   // the first real Pi event (Thinking… / tool name) arrives.
   const turn: Turn = { proc: null, running: true, activity: "", cwd, pendingUI: null };
   turns.set(sessionId, turn);
-  const proc = Bun.spawn(args, {
-    cwd,
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, PI_MOBILE_APPROVAL_MODE: approvalMode },
-  });
+  let proc: ReturnType<typeof Bun.spawn>;
+  try {
+    proc = Bun.spawn(args, {
+      cwd,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, PI_MOBILE_APPROVAL_MODE: approvalMode },
+    });
+  } catch (e) {
+    turns.delete(sessionId);
+    return { error: `failed to start pi: ${String(e)}`, status: 500 };
+  }
   turn.proc = proc;
   const images = (opts.images ?? [])
     .filter((img) => img?.data && img?.mimeType)
     .map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-  proc.stdin.write(JSON.stringify({
-    id: "1",
-    type: "prompt",
-    message: text,
-    ...(images.length ? { images } : {}),
-  }) + "\n");
-  proc.stdin.flush();
+  try {
+    proc.stdin.write(JSON.stringify({
+      id: "1",
+      type: "prompt",
+      message: text,
+      ...(images.length ? { images } : {}),
+    }) + "\n");
+    proc.stdin.flush();
+  } catch (e) {
+    try { proc.kill(); } catch {}
+    turns.delete(sessionId);
+    return { error: `failed to send prompt: ${String(e)}`, status: 500 };
+  }
 
   (async () => {
     let buf = "";

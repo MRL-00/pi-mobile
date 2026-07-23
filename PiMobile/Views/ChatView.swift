@@ -39,7 +39,11 @@ struct ChatView: View {
     /// keeps it at the top while the reply grows underneath.
     @State private var pinnedMessageId: String?
     @State private var pinnedContent: String?
-    @State private var pinOnNextRefresh = false
+    /// Server message ids present when the current send started — used so
+    /// optimistic rows / image pins don't latch onto an older same-text turn.
+    @State private var turnBaselineIds: Set<String> = []
+    /// Image-only sends have no optimistic row; pin once a *new* user message appears.
+    @State private var awaitingNewUserPin = false
     @State private var scrollPosition = ScrollPosition(idType: String.self)
     @State private var viewportHeight: CGFloat = 560
     @State private var isAtBottom = true
@@ -92,7 +96,12 @@ struct ChatView: View {
                 if let img { addImage(img); cameraImage = nil }
             }
             .onChange(of: dictation.transcript) { _, text in
+                // Keep draft in sync even for the final recognition result,
+                // which may land in the same turn that flips isListening off.
                 if dictation.isListening { draft = text }
+            }
+            .onChange(of: dictation.isListening) { _, listening in
+                if !listening { draft = dictation.transcript }
             }
             .onChange(of: dictation.errorMessage) { _, msg in
                 if let msg { alertMessage = msg }
@@ -223,7 +232,8 @@ struct ChatView: View {
     private func endTurnPin() {
         pinnedMessageId = nil
         pinnedContent = nil
-        pinOnNextRefresh = false
+        awaitingNewUserPin = false
+        turnBaselineIds = []
     }
 
     @ToolbarContentBuilder
@@ -458,6 +468,7 @@ struct ChatView: View {
         draft = ""
         pendingImages = []
         photoItems = []
+        turnBaselineIds = Set(messages.filter { !$0.id.hasPrefix("local-") }.map(\.id))
         // Show the user bubble immediately — refresh() remaps the pin to the
         // server id. The turn frame id stays "active-turn" so nothing jumps.
         if !text.isEmpty {
@@ -468,9 +479,11 @@ struct ChatView: View {
                 content: text,
                 createdAt: Date()
             ))
+            awaitingNewUserPin = false
             beginTurn(pinning: localId, content: text)
         } else {
-            pinOnNextRefresh = true
+            // Image-only: wait for a user row that wasn't already on the server.
+            awaitingNewUserPin = true
             pinnedContent = nil
         }
         running = true
@@ -519,6 +532,8 @@ struct ChatView: View {
             // ponytail: any failed status check stops polling; pull-to-refresh restarts it
             guard let status = try? await api.status(sessionId: sessionId) else {
                 running = false
+                pendingUI = nil
+                showApprovalPrompt = false
                 return
             }
             activity = status.activity
@@ -579,28 +594,31 @@ struct ChatView: View {
     private func refresh() async {
         guard let sessionId else { return }
         let latest = (try? await api.messages(sessionId: sessionId)) ?? messages
-        // Keep the optimistic user row until the server copy exists so the
-        // active-turn frame doesn't briefly vanish (that caused random jumps).
+        // Keep the optimistic user row until a *new* server copy exists (same
+        // text as an older turn must not suppress or steal the pin).
         let locals = messages.filter { $0.id.hasPrefix("local-") }
         var merged = latest
-        for local in locals where !merged.contains(where: {
-            $0.role == "user" && $0.content == local.content
-        }) {
-            merged.append(local)
+        for local in locals {
+            let hasNewCopy = merged.contains {
+                $0.role == "user"
+                    && $0.content == local.content
+                    && !turnBaselineIds.contains($0.id)
+            }
+            if !hasNewCopy { merged.append(local) }
         }
         messages = merged
 
-        if pinOnNextRefresh, let lastUser = merged.last(where: { $0.role == "user" }) {
+        if awaitingNewUserPin,
+           let lastUser = merged.last(where: { $0.role == "user" && !turnBaselineIds.contains($0.id) }) {
             beginTurn(pinning: lastUser.id, content: lastUser.content)
-            pinOnNextRefresh = false
+            awaitingNewUserPin = false
         } else if let pin = pinnedMessageId, !merged.contains(where: { $0.id == pin }) {
             // Remap local-* → server id; turn frame id stays "active-turn".
             if let content = pinnedContent,
-               let match = merged.last(where: { $0.role == "user" && $0.content == content }) {
+               let match = merged.last(where: {
+                   $0.role == "user" && $0.content == content && !turnBaselineIds.contains($0.id)
+               }) {
                 pinnedMessageId = match.id
-            } else if let lastUser = merged.last(where: { $0.role == "user" }) {
-                pinnedMessageId = lastUser.id
-                pinnedContent = lastUser.content
             }
         }
     }

@@ -357,12 +357,43 @@ struct MarkdownText: View {
         }
     }
 
+    /// Split on `|` but keep `\|` and pipes inside `` `inline code` ``.
     private static func parseCells(_ line: String) -> [String] {
         var t = line.trimmingCharacters(in: .whitespaces)
         if t.hasPrefix("|") { t.removeFirst() }
         if t.hasSuffix("|") { t.removeLast() }
-        return t.split(separator: "|", omittingEmptySubsequences: false)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
+
+        var cells: [String] = []
+        var current = ""
+        var inCode = false
+        var i = t.startIndex
+        while i < t.endIndex {
+            let ch = t[i]
+            if ch == "`" {
+                inCode.toggle()
+                current.append(ch)
+                i = t.index(after: i)
+                continue
+            }
+            if ch == "\\", !inCode {
+                let next = t.index(after: i)
+                if next < t.endIndex, t[next] == "|" {
+                    current.append("|")
+                    i = t.index(after: next)
+                    continue
+                }
+            }
+            if ch == "|", !inCode {
+                cells.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+                i = t.index(after: i)
+                continue
+            }
+            current.append(ch)
+            i = t.index(after: i)
+        }
+        cells.append(current.trimmingCharacters(in: .whitespaces))
+        return cells
     }
 
     private static func headingMatch(_ line: String) -> (Int, String)? {
