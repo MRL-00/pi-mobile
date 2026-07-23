@@ -158,6 +158,7 @@ struct ChatView: View {
             .scrollTargetLayout()
         }
         .scrollPosition($scrollPosition)
+        .scrollDismissesKeyboard(.interactively)
         .defaultScrollAnchor(.bottom, for: .initialOffset)
         .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { _, height in
             viewportHeight = height
