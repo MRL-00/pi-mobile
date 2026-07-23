@@ -8,6 +8,13 @@ import { resolve, basename, dirname } from "path";
 
 const SESSIONS_ROOT = `${homedir()}/.pi/agent/sessions`;
 const PORT = Number(process.env.PORT ?? 8940);
+// LaunchAgents get a tiny PATH — resolve `pi` explicitly so model listing and
+// RPC turns work even when ~/.local/bin isn't on it.
+const PI = [
+  `${homedir()}/.local/bin/pi`,
+  "/opt/homebrew/bin/pi",
+  "/usr/local/bin/pi",
+].find((p) => existsSync(p)) ?? "pi";
 
 // Persistent bearer token — server can expose chat history, so auth is required.
 const tokenDir = `${homedir()}/.pi-companion`;
@@ -22,8 +29,10 @@ const TOKEN = readFileSync(tokenPath, "utf8").trim();
 // the phone). Pi discovers projects implicitly by running in a folder; this
 // file covers the ones the phone created before their first session.
 const projectsPath = `${tokenDir}/projects.json`;
-// Entries are {path, added} (older versions stored bare path strings).
-const projectEntries = (): { path: string; added: number }[] => {
+// Entries are {path, added, name?} (older versions stored bare path strings).
+// `name` is the phone-facing workspace label (e.g. city) when we create a worktree.
+type ProjectEntry = { path: string; added: number; name?: string };
+const projectEntries = (): ProjectEntry[] => {
   try {
     return JSON.parse(readFileSync(projectsPath, "utf8")).map((e: any) =>
       typeof e === "string" ? { path: e, added: 0 } : e);
@@ -31,10 +40,17 @@ const projectEntries = (): { path: string; added: number }[] => {
 };
 const extraCwds = () => projectEntries().map((e) => e.path);
 const addedAt = (cwd: string) => projectEntries().find((e) => e.path === cwd)?.added ?? 0;
-const rememberCwd = (cwd: string) => {
+const storedName = (cwd: string) => projectEntries().find((e) => e.path === cwd)?.name;
+const rememberCwd = (cwd: string, name?: string) => {
   const list = projectEntries();
-  if (!list.some((e) => e.path === cwd))
-    writeFileSync(projectsPath, JSON.stringify([...list, { path: cwd, added: Date.now() }], null, 2));
+  const i = list.findIndex((e) => e.path === cwd);
+  if (i >= 0) {
+    if (name && !list[i].name) list[i] = { ...list[i], name };
+    else return;
+  } else {
+    list.push({ path: cwd, added: Date.now(), ...(name ? { name } : {}) });
+  }
+  writeFileSync(projectsPath, JSON.stringify(list, null, 2));
 };
 const forgetCwd = (cwd: string) => {
   writeFileSync(projectsPath, JSON.stringify(projectEntries().filter((e) => e.path !== cwd), null, 2));
@@ -234,17 +250,21 @@ function displayMessages(sessionId: string) {
 // rows. Ids are "provider/model" and pass straight to `pi --model`.
 let modelCache: { title: string; models: string[] }[] = [];
 function refreshModels() {
-  const p = Bun.spawnSync(["pi", "--list-models"], { stdout: "pipe" });
-  if (p.exitCode !== 0) return;
-  const groups = new Map<string, string[]>();
-  for (const line of p.stdout.toString().split("\n").slice(1)) {
-    const m = line.match(/^(\S+)\s+(\S+)/);
-    if (!m) continue;
-    const list = groups.get(m[1]) ?? [];
-    list.push(`${m[1]}/${m[2]}`);
-    groups.set(m[1], list);
+  try {
+    const p = Bun.spawnSync([PI, "--list-models"], { stdout: "pipe", stderr: "pipe" });
+    if (p.exitCode !== 0) return;
+    const groups = new Map<string, string[]>();
+    for (const line of p.stdout.toString().split("\n").slice(1)) {
+      const m = line.match(/^(\S+)\s+(\S+)/);
+      if (!m) continue;
+      const list = groups.get(m[1]) ?? [];
+      list.push(`${m[1]}/${m[2]}`);
+      groups.set(m[1], list);
+    }
+    if (groups.size) modelCache = [...groups].map(([title, models]) => ({ title, models }));
+  } catch {
+    // pi missing from PATH — keep whatever cache we have; phone falls back to static list
   }
-  if (groups.size) modelCache = [...groups].map(([title, models]) => ({ title, models }));
 }
 refreshModels();
 setInterval(refreshModels, 10 * 60_000);
@@ -263,22 +283,42 @@ function createSession(workspaceId: string) {
            updated_at: new Date().toISOString() };
 }
 
-const CITIES = ["lisbon","porto","quito","nairobi","hanoi","tbilisi","perth","leipzig","malmo","bergen","cusco","davao","hobart","tampere","galway","split"];
+// City/town labels — same idea as Conductor desktop workspaces. Folder + branch
+// stay lowercase; the phone-facing `name` is title-cased.
+const CITIES = [
+  "lisbon","porto","quito","nairobi","hanoi","tbilisi","perth","leipzig","malmo","bergen",
+  "cusco","davao","hobart","tampere","galway","split","ankara","doha","manila","seville",
+  "maputo","bissau","montreal","stockholm","denver","victoria","baku","oslo","kyoto","riga",
+];
+const titleCase = (s: string) => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+const workspaceLabel = (cwd: string) => {
+  const stored = storedName(cwd);
+  if (stored) return stored;
+  const base = basename(cwd);
+  // Phone-created worktrees live under ~/pi-workspaces/<repo>/<city>
+  if (cwd.startsWith(`${homedir()}/pi-workspaces/`)) return titleCase(base);
+  return base; // main checkout / user-added folders keep their folder name
+};
+
 function createWorkspace(repoId: string) {
   const root = scanned().repoRoots.get(repoId);
   if (!root || !existsSync(root)) return { error: "repo not found", status: 404 };
   if (!git(root, "rev-parse", "--git-dir")) return { error: "not a git repo", status: 400 };
-  const name = basename(root);
-  const city = CITIES.find((c) => !existsSync(`${homedir()}/pi-workspaces/${name}/${c}`)) ?? `mobile-${Date.now()}`;
-  const path = `${homedir()}/pi-workspaces/${name}/${city}`;
+  const repoName = basename(root);
+  const base = `${homedir()}/pi-workspaces/${repoName}`;
+  const unused = CITIES.filter((c) => !existsSync(`${base}/${c}`));
+  const city = unused.length ? unused[Math.floor(Math.random() * unused.length)] : `mobile-${Date.now()}`;
+  const label = titleCase(city);
+  const path = `${base}/${city}`;
   const branch = `mobile/${city}`;
+  mkdirSync(base, { recursive: true });
   const wt = Bun.spawnSync(["git", "worktree", "add", "-b", branch, path], { cwd: root, stdout: "pipe", stderr: "pipe" });
   if (wt.exitCode !== 0)
     return { error: `git worktree failed: ${wt.stderr.toString().trim()}`, status: 500 };
-  rememberCwd(path);
+  rememberCwd(path, label);
   scanCache = null;
   const id = encodeCwd(path);
-  return { id, repository_id: repoId, name: city, branch, status: "done", unread: false,
+  return { id, repository_id: repoId, name: label, branch, status: "done", unread: false,
            updated_at: new Date().toISOString(), last_message_snippet: null, session: createSession(id) };
 }
 
@@ -295,7 +335,7 @@ function sendMessage(sessionId: string, text: string, model?: string) {
   if (!cwd) return { error: "session not found", status: 404 };
   if (!existsSync(cwd)) return { error: "workspace directory not found on this Mac", status: 400 };
 
-  const args = ["pi", "--mode", "rpc"];
+  const args = [PI, "--mode", "rpc"];
   if (found) args.push("--session", found.file);
   else args.push("--session-id", sessionId);
   if (model) args.push("--model", model);
@@ -360,7 +400,7 @@ const workspacesOf = (repoId: string) => {
       return {
         id,
         repository_id: repoId,
-        name: basename(ws.cwd),
+        name: workspaceLabel(ws.cwd),
         branch: git(ws.cwd, "branch", "--show-current"),
         status: [...turns.values()].some((t) => t.running && t.cwd === ws.cwd) ? "in-progress" : "done",
         unread: false,

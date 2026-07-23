@@ -23,12 +23,10 @@ struct ChatView: View {
                 .padding(16)
             }
             .defaultScrollAnchor(.bottom)
-            VStack(spacing: 9) {
-                // Tabs live above the composer — iOS 26's nav-bar backdrop covers
-                // anything anchored to the top edge in pushed views.
-                if !sessions.isEmpty { tabBar }
+            VStack(alignment: .leading, spacing: 9) {
                 if running { streamingBar }
                 composer
+                modelPill
             }
             .padding(.horizontal, 14)
             .padding(.top, 10)
@@ -75,68 +73,6 @@ struct ChatView: View {
         .task { await load() }
         .task { await api.loadModelGroups() }
         .refreshable { await load() }
-    }
-
-    // Chat tabs, like the desktop's per-workspace tabs. "+" starts a new (Claude) chat.
-    private var tabBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(sessions) { s in
-                    Button { select(s) } label: {
-                        Text(s.title)
-                            .font(.system(size: 12.5, weight: .medium))
-                            .lineLimit(1)
-                            .foregroundStyle(s.id == sessionId ? Theme.text : Theme.textTertiary)
-                            .padding(.horizontal, 12).padding(.vertical, 6)
-                            .background(s.id == sessionId ? Color.white.opacity(0.09) : Color.white.opacity(0.03), in: Capsule())
-                    }
-                    .contextMenu {
-                        Button("Delete Chat", systemImage: "trash", role: .destructive) {
-                            Task {
-                                try? await api.deleteSession(s.id)
-                                sessions.removeAll { $0.id == s.id }
-                                if s.id == sessionId {
-                                    session = nil
-                                    messages = []
-                                    if let next = sessions.first { select(next) }
-                                }
-                            }
-                        }
-                    }
-                }
-                Button {
-                    Task {
-                        if let s = try? await api.createSession(workspaceId: workspace.id) {
-                            sessions.insert(s, at: 0)
-                            select(s)
-                        }
-                    }
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Theme.accent)
-                        .padding(.horizontal, 10).padding(.vertical, 7)
-                        .background(Color.white.opacity(0.05), in: Capsule())
-                }
-            }
-            .padding(.horizontal, 4)
-        }
-    }
-
-    private func select(_ s: ChatSession) {
-        guard s.id != sessionId else { return }
-        session = s
-        messages = []
-        model = nil
-        running = false
-        Task {
-            await refresh()
-            if let status = try? await api.status(sessionId: s.id), status.running {
-                running = true
-                activity = status.activity
-                await poll()
-            }
-        }
     }
 
     private var streamingBar: some View {
@@ -198,12 +134,11 @@ struct ChatView: View {
 
     private var composer: some View {
         HStack(spacing: 6) {
-            modelPill
             TextField(composerPlaceholder, text: $draft, axis: .vertical)
                 .lineLimit(1...5)
                 .font(.system(size: 14.5))
                 .foregroundStyle(Theme.text)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 12)
                 .onSubmit { send() }
             Button(action: send) {
                 Image(systemName: "arrow.up")

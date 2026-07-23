@@ -61,6 +61,18 @@ enum TokenStore {
     }
 }
 
+enum APIError: LocalizedError {
+    case badURL
+    case server(status: Int, message: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .badURL: return "Invalid server URL"
+        case .server(_, let message): return message
+        }
+    }
+}
+
 @Observable
 final class APIClient {
     var macs: [MacServer] {
@@ -139,14 +151,19 @@ final class APIClient {
     }
 
     private func post(_ path: String, body: [String: String] = [:]) async throws -> Data {
-        guard let mac = activeMac, let url = URL(string: mac.baseURL + path) else { throw URLError(.badURL) }
+        guard let mac = activeMac, let url = URL(string: mac.baseURL + path) else { throw APIError.badURL }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(mac.token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw URLError(.badServerResponse)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        guard http.statusCode == 200 else {
+            let message = (try? JSONDecoder().decode([String: String].self, from: data))?["error"]
+                ?? String(data: data, encoding: .utf8)
+                ?? "Request failed (\(http.statusCode))"
+            throw APIError.server(status: http.statusCode, message: message)
         }
         return data
     }

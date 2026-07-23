@@ -7,6 +7,7 @@ struct WorkspacesView: View {
     @State private var loaded = false
     @State private var creating = false
     @State private var newWorkspace: Workspace?
+    @State private var createError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -53,6 +54,14 @@ struct WorkspacesView: View {
         }
         .navigationDestination(for: Workspace.self) { ChatView(workspace: $0) }
         .navigationDestination(item: $newWorkspace) { ChatView(workspace: $0) }
+        .alert("Couldn't create workspace", isPresented: Binding(
+            get: { createError != nil },
+            set: { if !$0 { createError = nil } }
+        )) {
+            Button("OK", role: .cancel) { createError = nil }
+        } message: {
+            Text(createError ?? "")
+        }
         .task {
             // Route all calls in this repo (and chats below it) to its owning Mac.
             api.activeMac = api.mac(withId: repo.macId)
@@ -91,12 +100,16 @@ struct WorkspacesView: View {
     }
 
     // Creates a fresh worktree + session on the Mac and jumps straight into the chat.
+    // The companion server picks a city/town name (Conductor-style) for the workspace.
     private func createWorkspace() async {
         creating = true
         defer { creating = false }
-        if let ws = try? await api.createWorkspace(repoId: repo.id) {
+        do {
+            let ws = try await api.createWorkspace(repoId: repo.id)
             workspaces.insert(ws, at: 0)
             newWorkspace = ws
+        } catch {
+            createError = error.localizedDescription
         }
     }
 
