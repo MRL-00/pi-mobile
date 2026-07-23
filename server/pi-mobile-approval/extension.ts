@@ -6,6 +6,13 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const summarize = (input: Record<string, unknown> | undefined) => {
   if (!input) return "";
+  const asList = (v: unknown) =>
+    Array.isArray(v) ? v.map(String).filter(Boolean) : v != null && v !== "" ? [String(v)] : [];
+  const queries = asList(input.queries ?? input.query);
+  if (queries.length) return queries.map((q) => `"${q}"`).join("\n").slice(0, 400);
+  const urls = asList(input.urls ?? input.url);
+  if (urls.length) return urls.join("\n").slice(0, 400);
+  if (input.urlIndex != null) return `urlIndex=${input.urlIndex}`;
   const v =
     input.file_path ?? input.path ?? input.command ?? input.pattern ?? input.description ?? "";
   return String(v).slice(0, 200);

@@ -213,15 +213,99 @@ function sessionSummary(file: string, workspaceId: string) {
 // ── Display messages ────────────────────────────────────────────────────────
 // Same row shapes the phone already renders: user / assistant / thinking /
 // tool / duration rows in chronological order.
-const summarizeInput = (input: any) => {
-  const v = input?.file_path ?? input?.path ?? input?.command ?? input?.pattern ?? input?.description ?? "";
-  return String(v).slice(0, 80);
+//
+// Tool rows are multi-line: first line is `name short-label` (collapsed pill),
+// remaining lines are expandable detail (args + a truncated result preview).
+const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+const asList = (v: unknown): string[] =>
+  Array.isArray(v) ? v.map((x) => String(x)).filter(Boolean) : v != null && v !== "" ? [String(v)] : [];
+const toolText = (msg: any): string => {
+  const c = msg?.content;
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) return c.map((p: any) => p?.text ?? "").filter(Boolean).join("\n");
+  return "";
 };
+
+const summarizeInput = (input: any) => {
+  if (!input || typeof input !== "object") return "";
+  const queries = asList(input.queries ?? input.query);
+  if (queries.length === 1) return truncate(queries[0], 80);
+  if (queries.length > 1) return `${queries.length} queries`;
+  const urls = asList(input.urls ?? input.url);
+  if (urls.length === 1) return truncate(urls[0], 80);
+  if (urls.length > 1) return `${urls.length} URLs`;
+  if (input.urlIndex != null) return `urlIndex=${input.urlIndex}`;
+  const v = input.file_path ?? input.path ?? input.command ?? input.pattern ?? input.description ?? "";
+  return truncate(String(v), 80);
+};
+
+function formatToolCall(name: string, args: any): string {
+  const header = `${name} ${summarizeInput(args)}`.trimEnd();
+  const lines: string[] = [];
+  const queries = asList(args?.queries ?? args?.query);
+  if (queries.length) {
+    for (const q of queries) lines.push(`"${q}"`);
+  }
+  const urls = asList(args?.urls ?? (args?.urlIndex == null ? args?.url : null));
+  if (urls.length) {
+    for (const u of urls) lines.push(u);
+  }
+  if (args?.urlIndex != null && args?.responseId) {
+    lines.push(`responseId=${args.responseId}`);
+  }
+  // Long bash/read args: keep the full value available on expand.
+  const primary = args?.file_path ?? args?.path ?? args?.command ?? args?.pattern ?? args?.description;
+  if (!queries.length && !urls.length && typeof primary === "string" && primary.length > 80) {
+    lines.push(primary);
+  }
+  return lines.length ? `${header}\n${lines.join("\n")}` : header;
+}
+
+function formatToolResult(msg: any): string {
+  const d = msg?.details ?? {};
+  const text = toolText(msg).trim();
+  const lines: string[] = [];
+  const name = msg?.toolName ?? "";
+
+  if (name === "web_search" || d.queryCount != null) {
+    const ok = d.successfulQueries ?? d.queryCount;
+    const total = d.queryCount;
+    const sources = d.totalResults;
+    if (total != null) {
+      let s = `${ok ?? total}/${total} queries`;
+      if (sources != null) s += ` · ${sources} sources`;
+      lines.push(s);
+    }
+  } else if (name === "fetch_content" || d.urlCount != null) {
+    const ok = d.successful ?? d.urlCount;
+    const total = d.urlCount;
+    if (total != null) {
+      let s = `${ok ?? total}/${total} URLs`;
+      if (d.totalChars != null) s += ` · ${d.totalChars} chars`;
+      lines.push(s);
+    }
+  } else if (name === "get_search_content" || d.title || d.contentLength != null) {
+    const title = d.title || d.url;
+    if (title) lines.push(String(title));
+    if (d.url && d.title) lines.push(String(d.url));
+    if (d.contentLength != null) lines.push(`${d.contentLength} chars`);
+  }
+
+  if (msg?.isError && !lines.length) lines.push("Error");
+
+  // Preview of result body — enough to see what Pi got, not a full page dump.
+  if (text) {
+    const preview = truncate(text.replace(/\n{3,}/g, "\n\n"), 700);
+    if (preview) lines.push(preview);
+  }
+  return lines.join("\n");
+}
 
 function displayMessages(sessionId: string) {
   const found = findSessionFile(sessionId);
   if (!found) return { error: "session not found", status: 404 };
   const out: { id: string; role: string; content: string; created_at: string }[] = [];
+  const toolIndex = new Map<string, number>(); // toolCallId → out index
   let turnStart: number | null = null;
   for (const e of activeBranch(readEntries(found.file))) {
     if (e.type !== "message") continue;
@@ -249,8 +333,15 @@ function displayMessages(sessionId: string) {
           out.push({ id: `${e.id}-${i}`, role: "assistant", content: b.text, created_at: createdAt });
         else if (b.type === "thinking" && b.thinking?.trim())
           out.push({ id: `${e.id}-${i}`, role: "thinking", content: b.thinking, created_at: createdAt });
-        else if (b.type === "toolCall")
-          out.push({ id: `${e.id}-${i}`, role: "tool", content: `${b.name} ${summarizeInput(b.arguments)}`, created_at: createdAt });
+        else if (b.type === "toolCall") {
+          out.push({
+            id: `${e.id}-${i}`,
+            role: "tool",
+            content: formatToolCall(b.name, b.arguments),
+            created_at: createdAt,
+          });
+          if (b.id) toolIndex.set(b.id, out.length - 1);
+        }
       }
       if (msg.stopReason === "error" && msg.errorMessage)
         out.push({ id: `${e.id}-err`, role: "assistant", content: `⚠️ ${String(msg.errorMessage).slice(0, 300)}`, created_at: createdAt });
@@ -259,8 +350,23 @@ function displayMessages(sessionId: string) {
         if (s >= 5) out.push({ id: `${e.id}-dur`, role: "duration", content: s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`, created_at: createdAt });
         turnStart = null;
       }
+    } else if (msg.role === "toolResult" && msg.toolCallId) {
+      const idx = toolIndex.get(msg.toolCallId);
+      if (idx == null) continue;
+      const detail = formatToolResult(msg);
+      if (detail) {
+        let content = out[idx].content;
+        // Once we know the page title, prefer it over bare urlIndex=N in the pill.
+        const title = msg.details?.title;
+        if (title && /^get_search_content\b/.test(content.split("\n", 1)[0] ?? "")) {
+          const nl = content.indexOf("\n");
+          const rest = nl >= 0 ? content.slice(nl) : "";
+          content = `get_search_content ${truncate(String(title), 80)}${rest}`;
+        }
+        out[idx].content = `${content}\n\n${detail}`;
+      }
+      toolIndex.delete(msg.toolCallId);
     }
-    // toolResult rows are skipped — the tool row already shows the call.
   }
   return out;
 }

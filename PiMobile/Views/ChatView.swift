@@ -876,30 +876,72 @@ struct ThinkingRow: View {
 }
 
 struct ToolRow: View {
-    let content: String   // "ToolName arg-summary"
+    // Multi-line from the companion: first line is "ToolName short-label",
+    // remaining lines are expandable detail (queries/URLs + result preview).
+    let content: String
+    @State private var expanded = false
 
-    private var tag: String { content.split(separator: " ").first.map(String.init) ?? "TOOL" }
-    private var label: String { content.dropFirst(tag.count).trimmingCharacters(in: .whitespaces) }
+    private var tag: String {
+        content.split(whereSeparator: \.isNewline).first?
+            .split(separator: " ").first.map(String.init) ?? "TOOL"
+    }
+    private var rest: String {
+        content.dropFirst(tag.count).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    private var label: String {
+        String(rest.split(whereSeparator: \.isNewline).first ?? "")
+    }
+    private var detail: String {
+        guard let idx = rest.firstIndex(of: "\n") else { return "" }
+        return String(rest[rest.index(after: idx)...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    private var expandable: Bool { !detail.isEmpty }
     private var isEdit: Bool { ["Edit", "Write", "NotebookEdit"].contains(tag) }
 
     var body: some View {
-        HStack(spacing: 9) {
-            Text(tag.uppercased())
-                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                .kerning(0.8)
-                .foregroundStyle(isEdit ? Color(red: 0.66, green: 0.72, blue: 0.91) : Color(red: 0.58, green: 0.86, blue: 0.66))
-                .padding(.horizontal, 6).padding(.vertical, 3)
-                .background(
-                    (isEdit ? Theme.accent.opacity(0.12) : Theme.green.opacity(0.1)),
-                    in: RoundedRectangle(cornerRadius: 5)
-                )
-            Text(label)
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(Theme.textSecondary)
-                .lineLimit(1)
-            Spacer()
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                guard expandable else { return }
+                withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 9) {
+                    if expandable {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                    Text(tag.uppercased())
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .kerning(0.8)
+                        .foregroundStyle(isEdit ? Color(red: 0.66, green: 0.72, blue: 0.91) : Color(red: 0.58, green: 0.86, blue: 0.66))
+                        .padding(.horizontal, 6).padding(.vertical, 3)
+                        .background(
+                            (isEdit ? Theme.accent.opacity(0.12) : Theme.green.opacity(0.1)),
+                            in: RoundedRectangle(cornerRadius: 5)
+                        )
+                    Text(label)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(expanded ? nil : 1)
+                        .multilineTextAlignment(.leading)
+                    Spacer(minLength: 0)
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(!expandable)
+
+            if expanded {
+                Text(detail)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Theme.textTertiary)
+                    .lineSpacing(3)
+                    .textSelection(.enabled)
+                    .copyable(detail)
+            }
         }
         .padding(.horizontal, 12).padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.toolBg, in: RoundedRectangle(cornerRadius: 11))
         .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(Color.white.opacity(0.07), lineWidth: 1))
     }
