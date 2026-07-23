@@ -206,6 +206,14 @@ struct PromptImage: Codable, Hashable {
     let mimeType: String
 }
 
+// From the companion's /pi-version — compares `pi --version` to pi.dev.
+struct PiVersionInfo: Codable, Hashable {
+    let current: String?
+    let latest: String?
+    let updateAvailable: Bool
+    let updateCommand: String
+}
+
 struct ChatMessage: Identifiable, Codable, Hashable {
     let id: String
     let role: String        // user | assistant | tool

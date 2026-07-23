@@ -373,6 +373,63 @@ const approvalInstalled = () => {
   } catch { return false; }
 };
 
+// ── Pi version ──────────────────────────────────────────────────────────────
+// Same contract Pi's own CLI uses (`pi.dev/api/latest-version`). Surfaces an
+// "run pi update" hint to the phone when the Mac's install is behind.
+type PiVersionInfo = {
+  current: string | null;
+  latest: string | null;
+  update_available: boolean;
+  update_command: string;
+};
+let piVersionCache: PiVersionInfo = {
+  current: null, latest: null, update_available: false, update_command: "pi update",
+};
+
+function parseSemver(v: string): [number, number, number] | null {
+  const m = v.trim().match(/^v?(\d+)\.(\d+)\.(\d+)/);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+function isOlder(current: string, latest: string): boolean {
+  const a = parseSemver(current);
+  const b = parseSemver(latest);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) {
+    if (a[i]! < b[i]!) return true;
+    if (a[i]! > b[i]!) return false;
+  }
+  return false;
+}
+
+async function refreshPiVersion() {
+  const p = Bun.spawnSync(["pi", "--version"], { stdout: "pipe", stderr: "pipe" });
+  const raw = p.exitCode === 0
+    ? (p.stdout.toString().trim() || p.stderr.toString().trim())
+    : "";
+  const current = raw.match(/v?(\d+\.\d+\.\d+)/)?.[1] ?? null;
+
+  let latest: string | null = null;
+  try {
+    const res = await fetch("https://pi.dev/api/latest-version", {
+      headers: { "User-Agent": `pi-companion/${current ?? "unknown"}` },
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { version?: string };
+      if (data.version) latest = data.version.replace(/^v/, "");
+    }
+  } catch { /* offline / API down — leave latest null */ }
+
+  piVersionCache = {
+    current,
+    latest,
+    update_available: !!(current && latest && isOlder(current, latest)),
+    update_command: "pi update",
+  };
+}
+refreshPiVersion();
+setInterval(refreshPiVersion, 10 * 60_000);
+
 // ── Creating workspaces & sessions ──────────────────────────────────────────
 // A session id minted here materializes on disk on first send (pi --session-id
 // creates it if missing). Until then remember which cwd it belongs to.
@@ -743,6 +800,7 @@ Bun.serve({
         });
       }
       if (path === "/models") return Response.json(modelCache);
+      if (path === "/pi-version") return Response.json(piVersionCache);
       if (path === "/repos") return Response.json(repos());
       if ((m = path.match(/^\/repos\/([^/]+)\/workspaces$/))) return Response.json(workspacesOf(m[1]));
       if ((m = path.match(/^\/workspaces\/([^/]+)\/sessions$/))) return Response.json(sessionsOf(m[1]));
