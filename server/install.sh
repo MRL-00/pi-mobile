@@ -10,6 +10,20 @@ LOG_DIR="$HOME/.pi-companion"
 # LaunchAgents don't inherit your shell PATH — include where bun/pi usually live.
 AGENT_PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+# Refuse to run from inside the companion service itself (e.g. a Pi agent turn
+# spawned by the server): bootout would kill this script's own process tree
+# mid-install, leaving the service unloaded and the turn dead.
+SVC_PID="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '/pid =/{print $3; exit}')"
+p=$$
+while [[ -n "${SVC_PID:-}" && "$p" -gt 1 ]]; do
+  if [[ "$p" == "$SVC_PID" ]]; then
+    echo "error: install.sh is running inside the pi-companion service it would restart." >&2
+    echo "Run it from a regular terminal on the Mac instead." >&2
+    exit 1
+  fi
+  p="$(ps -o ppid= -p "$p" | tr -d ' ')"
+done
+
 if [[ "${1:-}" == "--uninstall" ]]; then
   launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
   rm -f "$PLIST"
