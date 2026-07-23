@@ -583,6 +583,18 @@ function sendMessage(
     return { error: `failed to send prompt: ${String(e)}`, status: 500 };
   }
 
+  // Mark the turn done immediately — don't wait for stdout EOF, which never
+  // comes if a tool left a background child holding the pipe open.
+  const finish = () => {
+    pendingSessions.delete(sessionId); // it's on disk now
+    turn.running = false;
+    turn.activity = "";
+    turn.pendingUI = null;
+  };
+
+  // Drain stderr so pi can't block on a full pipe and never emit agent_end.
+  (async () => { for await (const _ of proc.stderr as any) {} })();
+
   (async () => {
     let buf = "";
     for await (const chunk of proc.stdout as any) {
@@ -602,6 +614,13 @@ function sendMessage(
             options: ev.options,
           };
           turn.activity = ev.title ?? "Waiting for approval…";
+        } else if (ev.type === "extension_ui_request" && ev.id) {
+          // Unknown UI method the phone can't render — cancel it so pi doesn't
+          // block forever waiting for a response that will never come.
+          try {
+            proc.stdin.write(JSON.stringify({ type: "extension_ui_response", id: ev.id, cancelled: true }) + "\n");
+            proc.stdin.flush();
+          } catch {}
         } else if (ev.type === "tool_execution_start") {
           turn.pendingUI = null;
           turn.activity = `${ev.toolName ?? "tool"} ${summarizeInput(ev.args)}`;
@@ -610,17 +629,14 @@ function sendMessage(
         else if (ev.type === "response" && ev.success === false)
           turn.activity = `⚠️ ${ev.error ?? "command failed"}`;
         else if (ev.type === "agent_end") {
-          turn.pendingUI = null;
-          proc.stdin.end();
+          finish();
+          try { proc.stdin.end(); } catch {}
           proc.kill(); // pi stays resident waiting for more commands; the turn is done
         }
       }
     }
     await proc.exited;
-    pendingSessions.delete(sessionId); // it's on disk now
-    turn.running = false;
-    turn.activity = "";
-    turn.pendingUI = null;
+    finish(); // safety net for abnormal exits (crash, kill) with no agent_end
   })();
 
   return { ok: true };
