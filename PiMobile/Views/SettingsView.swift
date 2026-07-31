@@ -5,6 +5,8 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var statuses: [UUID: Bool] = [:]
     @State private var piVersions: [UUID: PiVersionInfo] = [:]
+    @State private var piUpdatesInFlight: Set<UUID> = []
+    @State private var piUpdateErrors: [UUID: String] = [:]
 
     private var macsNeedingPiUpdate: [(mac: MacServer, info: PiVersionInfo)] {
         api.macs.compactMap { mac in
@@ -22,28 +24,44 @@ struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 10) {
                                 Text("\(item.mac.name) is on Pi \(item.info.current ?? "?"); \(item.info.latest ?? "?") is available.")
                                     .font(.subheadline)
-                                HStack {
-                                    Text(item.info.updateCommand)
-                                        .font(.caption.monospaced())
-                                        .foregroundStyle(Theme.accent)
-                                        .textSelection(.enabled)
-                                    Spacer()
-                                    Button {
-                                        UIPasteboard.general.string = item.info.updateCommand
-                                    } label: {
-                                        Image(systemName: "doc.on.doc")
+                                Button {
+                                    Task { await updatePi(on: item.mac) }
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        if piUpdatesInFlight.contains(item.mac.id) {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                            Text("Updating…")
+                                        } else {
+                                            Label(
+                                                piUpdateErrors[item.mac.id] == nil ? "Update Pi" : "Try Again",
+                                                systemImage: "arrow.down.circle"
+                                            )
+                                        }
                                     }
-                                    .buttonStyle(.borderless)
+                                    .frame(maxWidth: .infinity)
                                 }
-                                .padding(10)
-                                .background(Theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                                .buttonStyle(.borderedProminent)
+                                .disabled(piUpdatesInFlight.contains(item.mac.id))
+                                .accessibilityLabel(
+                                    piUpdatesInFlight.contains(item.mac.id)
+                                        ? "Updating Pi on \(item.mac.name)"
+                                        : "Update Pi on \(item.mac.name)"
+                                )
+
+                                if let error = piUpdateErrors[item.mac.id] {
+                                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                                        .font(.caption)
+                                        .foregroundStyle(.red)
+                                        .accessibilityLabel("Pi update failed: \(error)")
+                                }
                             }
                             .padding(.vertical, 2)
                         }
                     } header: {
                         Text("Update Pi")
                     } footer: {
-                        Text("Run this in Terminal on that Mac — Pi updates there, not in this app.")
+                        Text("Pi Companion updates Pi directly on that Mac. Finish any running Pi turn first.")
                     }
                 }
 
@@ -170,6 +188,21 @@ struct SettingsView: View {
             if let info = try? await api.piVersion(on: mac) {
                 piVersions[mac.id] = info
             }
+        }
+    }
+
+    private func updatePi(on mac: MacServer) async {
+        piUpdateErrors[mac.id] = nil
+        piUpdatesInFlight.insert(mac.id)
+        defer { piUpdatesInFlight.remove(mac.id) }
+
+        do {
+            let info = try await api.updatePi(on: mac)
+            withAnimation(.easeOut(duration: 0.2)) {
+                piVersions[mac.id] = info
+            }
+        } catch {
+            piUpdateErrors[mac.id] = error.localizedDescription
         }
     }
 }

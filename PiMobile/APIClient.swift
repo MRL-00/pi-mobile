@@ -181,10 +181,17 @@ final class APIClient {
         return try decoder.decode(T.self, from: data)
     }
 
-    private func post(_ path: String, body: some Encodable) async throws -> Data {
-        guard let mac = activeMac, let url = URL(string: mac.baseURL + path) else { throw APIError.badURL }
+    private func post(
+        _ path: String,
+        on requestedMac: MacServer? = nil,
+        body: some Encodable,
+        timeoutInterval: TimeInterval = 60
+    ) async throws -> Data {
+        guard let mac = requestedMac ?? activeMac,
+              let url = URL(string: mac.baseURL + path) else { throw APIError.badURL }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = timeoutInterval
         request.setValue("Bearer \(mac.token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // Request bodies stay camelCase to match the companion server's JSON.
@@ -206,6 +213,15 @@ final class APIClient {
 
     func repos(on mac: MacServer) async throws -> [Repo] { try await get("/repos", on: mac) }
     func piVersion(on mac: MacServer) async throws -> PiVersionInfo { try await get("/pi-version", on: mac) }
+    func updatePi(on mac: MacServer) async throws -> PiVersionInfo {
+        let data = try await post(
+            "/pi-update",
+            on: mac,
+            body: [String: String](),
+            timeoutInterval: 180
+        )
+        return try decoder.decode(PiVersionInfo.self, from: data)
+    }
 
     func loadModelGroups() async {
         // Keep the last good list on failure (older server without /models, offline).
