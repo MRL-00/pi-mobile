@@ -13,7 +13,7 @@ AGENT_PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/us
 # Refuse to run from inside the companion service itself (e.g. a Pi agent turn
 # spawned by the server): bootout would kill this script's own process tree
 # mid-install, leaving the service unloaded and the turn dead.
-SVC_PID="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '/pid =/{print $3; exit}')"
+SVC_PID="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '/pid =/{print $3; exit}' || true)"
 p=$$
 while [[ -n "${SVC_PID:-}" && "$p" -gt 1 ]]; do
   if [[ "$p" == "$SVC_PID" ]]; then
