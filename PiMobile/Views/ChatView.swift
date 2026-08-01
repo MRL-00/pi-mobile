@@ -323,8 +323,33 @@ struct ChatView: View {
         "Ask \(prettyModel(selectedModelId))"
     }
 
+    /// Slash-command autocomplete: active while the draft's first word is a
+    /// bare `/…` with no space yet, so typing `/` lists every installed skill.
+    private var slashActive: Bool {
+        let t = draft.trimmingCharacters(in: .whitespaces)
+        return t.hasPrefix("/")
+            && !t.dropFirst().contains(" ")
+            && !api.skills.isEmpty
+            && !running
+    }
+
+    private var slashMatches: [SkillInfo] {
+        guard slashActive else { return [] }
+        let q = String(draft.trimmingCharacters(in: .whitespaces).dropFirst()).lowercased()
+        if q.isEmpty { return Array(api.skills.prefix(6)) }
+        return api.skills.filter {
+            $0.name.lowercased().contains(q) || $0.command.lowercased().contains(q)
+        }.prefix(6).map { $0 }
+    }
+
     private var composer: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if !slashMatches.isEmpty {
+                SlashSkillMenu(skills: slashMatches) { skill in
+                    insertSkill(skill)
+                }
+            }
+
             if !pendingImages.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -754,6 +779,44 @@ struct ChatView: View {
                 pinnedMessageId = match.id
             }
         }
+    }
+}
+
+/// Compact slash-command picker that floats at the top of the composer while
+/// the user types `/`. Selecting inserts `/skill:name` into the draft.
+private struct SlashSkillMenu: View {
+    let skills: [SkillInfo]
+    let onPick: (SkillInfo) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(skills) { skill in
+                Button { onPick(skill) } label: {
+                    HStack(spacing: 10) {
+                        Text(skill.command)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(Theme.accent)
+                            .lineLimit(1)
+                        if !skill.description.isEmpty {
+                            Text(skill.description)
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.textTertiary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                if skill.id != skills.last?.id {
+                    Divider().overlay(Theme.separator).padding(.leading, 12)
+                }
+            }
+        }
+        .background(Theme.toolBg, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
     }
 }
 
