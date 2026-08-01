@@ -33,13 +33,13 @@ struct SettingsView: View {
                                                 .controlSize(.small)
                                             Text("Updating…")
                                         } else {
-                                            Label(
-                                                piUpdateErrors[item.mac.id] == nil ? "Update Pi" : "Try Again",
-                                                systemImage: "arrow.down.circle"
-                                            )
+                                            Image(systemName: "arrow.down.circle")
+                                                .symbolRenderingMode(.monochrome)
+                                            Text(piUpdateErrors[item.mac.id] == nil ? "Update Pi" : "Try Again")
                                         }
                                     }
                                     .frame(maxWidth: .infinity)
+                                    .foregroundStyle(.white)
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .disabled(piUpdatesInFlight.contains(item.mac.id))
