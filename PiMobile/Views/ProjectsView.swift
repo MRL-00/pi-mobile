@@ -2,12 +2,25 @@ import SwiftUI
 
 struct ProjectsView: View {
     @Environment(APIClient.self) private var api
-    @State private var repos: [Repo] = []
+    @State private var allRepos: [Repo] = []
     @State private var onlineMacs: Set<UUID> = []
     @State private var showSettings = false
     @State private var showAddProject = false
+    @State private var resolvedInitialMac = false
 
-    private var connected: Bool { !onlineMacs.isEmpty }
+    private var selectedMac: MacServer? {
+        guard let id = api.activeMac?.id else { return api.macs.first }
+        return api.macs.first { $0.id == id } ?? api.macs.first
+    }
+
+    private var connected: Bool {
+        selectedMac.map { onlineMacs.contains($0.id) } ?? false
+    }
+
+    private var repos: [Repo] {
+        guard let id = selectedMac?.id else { return [] }
+        return allRepos.filter { $0.macId == id }
+    }
 
     var body: some View {
         NavigationStack {
@@ -35,11 +48,22 @@ struct ProjectsView: View {
             }
             .background(Theme.bg)
             .navigationDestination(for: Repo.self) { WorkspacesView(repo: $0) }
-            .sheet(isPresented: $showSettings) { SettingsView() }
+            .sheet(isPresented: $showSettings, onDismiss: { Task { await load() } }) { SettingsView() }
             .sheet(isPresented: $showAddProject) {
                 FolderPickerView { path in
                     Task { try? await api.addProject(path: path); await load() }
                 }
+            }
+            .alert("Mac pairing", isPresented: Binding(
+                get: { api.pairingNotice != nil },
+                set: { if !$0 {
+                    api.pairingNotice = nil
+                    Task { await load() }
+                } }
+            )) {
+                Button("OK", role: .cancel) { api.pairingNotice = nil }
+            } message: {
+                Text(api.pairingNotice ?? "")
             }
             .task { await load() }
         }
@@ -68,13 +92,33 @@ struct ProjectsView: View {
                         .background(Color(red: 0.47, green: 0.47, blue: 0.5).opacity(0.16), in: Circle())
                         .overlay(Circle().strokeBorder(Color.white.opacity(0.13), lineWidth: 0.5))
                 }
-                Button { showSettings = true } label: {
+                .disabled(!connected)
+                .accessibilityLabel("Add a project on \(selectedMac?.name ?? "the selected Mac")")
+                Menu {
+                    Section("Connect to") {
+                        ForEach(api.macs) { mac in
+                            Button { api.activeMac = mac } label: {
+                                Label(
+                                    "\(mac.name) · \(onlineMacs.contains(mac.id) ? "online" : "offline")",
+                                    systemImage: mac.id == selectedMac?.id ? "checkmark.circle.fill" : "circle"
+                                )
+                            }
+                        }
+                    }
+                    Divider()
+                    Button { showSettings = true } label: {
+                        Label("Manage Macs", systemImage: "gearshape")
+                    }
+                } label: {
                     HStack(spacing: 7) {
                         Circle()
                             .fill(connected ? Theme.accent : Theme.textMuted)
                             .frame(width: 7, height: 7)
                             .shadow(color: connected ? Theme.accent : .clear, radius: 4)
                         Text(macPillLabel)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Theme.textTertiary)
                     }
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Theme.textSecondary)
@@ -93,17 +137,14 @@ struct ProjectsView: View {
     }
 
     private var macPillLabel: String {
-        if api.macs.count <= 1 {
-            let name = api.macs.first?.name ?? "Mac"
-            return "\(name) · \(connected ? "online" : "offline")"
-        }
-        return "\(onlineMacs.count) of \(api.macs.count) Macs online"
+        guard let selectedMac else { return "Choose a Mac" }
+        return "\(selectedMac.name) · \(connected ? "online" : "offline")"
     }
 
     private var subtitle: String {
         connected
             ? "\(repos.count) projects · \(repos.reduce(0) { $0 + $1.activeWorkspaceCount }) active workspaces"
-            : "Check your Macs in settings."
+            : "\(selectedMac?.name ?? "This Mac") is offline. Choose another Mac or check its settings."
     }
 
     private var repoCard: some View {
@@ -158,7 +199,18 @@ struct ProjectsView: View {
                 }
             }
         }
-        repos = all
+        if let activeID = api.activeMac?.id,
+           !api.macs.contains(where: { $0.id == activeID }) {
+            api.activeMac = api.macs.first
+        }
+        if !resolvedInitialMac {
+            if let selectedMac, !online.contains(selectedMac.id),
+               let firstOnline = api.macs.first(where: { online.contains($0.id) }) {
+                api.activeMac = firstOnline
+            }
+            resolvedInitialMac = true
+        }
+        allRepos = all
         onlineMacs = online
     }
 }
@@ -197,10 +249,27 @@ struct FolderPickerView: View {
     let onPick: (String) -> Void
 
     @State private var listing: FolderListing?
+    @State private var browseError: String?
+    @State private var isLoading = false
 
     var body: some View {
         NavigationStack {
             List {
+                if isLoading && listing == nil {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                        Spacer()
+                    }
+                    .listRowBackground(Color.clear)
+                } else if let browseError, listing == nil {
+                    ContentUnavailableView(
+                        "Couldn't Load Folders",
+                        systemImage: "folder.badge.questionmark",
+                        description: Text(browseError)
+                    )
+                    .listRowBackground(Color.clear)
+                }
                 if let parent = listing?.parent {
                     Button { Task { await open(parent) } } label: {
                         Label("..", systemImage: "arrow.turn.left.up")
@@ -232,6 +301,13 @@ struct FolderPickerView: View {
     }
 
     private func open(_ path: String?) async {
-        if let l = try? await api.browse(path: path) { listing = l }
+        browseError = nil
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            listing = try await api.browse(path: path)
+        } catch {
+            browseError = error.localizedDescription
+        }
     }
 }

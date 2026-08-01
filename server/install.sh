@@ -13,7 +13,7 @@ AGENT_PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/us
 # Refuse to run from inside the companion service itself (e.g. a Pi agent turn
 # spawned by the server): bootout would kill this script's own process tree
 # mid-install, leaving the service unloaded and the turn dead.
-SVC_PID="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '/pid =/{print $3; exit}')"
+SVC_PID="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '/pid =/{print $3; exit}' || true)"
 p=$$
 while [[ -n "${SVC_PID:-}" && "$p" -gt 1 ]]; do
   if [[ "$p" == "$SVC_PID" ]]; then
@@ -88,7 +88,33 @@ cat > "$PLIST" <<EOF
 </plist>
 EOF
 
+# Legacy Conductor Mobile companion used the same port (8940). If it's still
+# installed, it wins the bind and pi-companion fails with EADDRINUSE — no QR.
+LEGACY_LABEL="co.bungy.conductor-companion"
+LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
+if [[ -f "$LEGACY_PLIST" ]]; then
+  echo "Stopping legacy Conductor companion (conflicts on port 8940)…"
+  launchctl bootout "gui/$(id -u)" "$LEGACY_PLIST" 2>/dev/null || true
+  mv "$LEGACY_PLIST" "${LEGACY_PLIST}.disabled"
+fi
+
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
+
+# Free port 8940 if an orphaned bun/server is still listening after bootout.
+PORT=8940
+for _ in $(seq 1 20); do
+  PIDS="$(lsof -tiTCP:$PORT -sTCP:LISTEN 2>/dev/null || true)"
+  [[ -z "$PIDS" ]] && break
+  # shellcheck disable=SC2086
+  kill $PIDS 2>/dev/null || true
+  sleep 0.25
+done
+if lsof -tiTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "error: port $PORT is still in use after stopping old companions." >&2
+  lsof -nP -iTCP:$PORT -sTCP:LISTEN >&2 || true
+  exit 1
+fi
+
 : > "$LOG_DIR/server.log"
 : > "$LOG_DIR/server.err.log"
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
@@ -106,11 +132,14 @@ if [[ -s "$LOG_DIR/server.log" ]]; then
 else
   echo
   echo "Server didn't print a banner yet — check $LOG_DIR/server.err.log"
+  if grep -q "EADDRINUSE\|port $PORT" "$LOG_DIR/server.err.log" 2>/dev/null; then
+    echo "Hint: something else is bound to port $PORT (often a leftover Conductor companion)."
+  fi
   if [[ -f "$LOG_DIR/token" ]]; then
     HOST="$(scutil --get LocalHostName 2>/dev/null || hostname | sed 's/\.local$//')"
     echo
     echo "Pair manually in the iPhone app Settings:"
-    echo "  Server address:  http://${HOST}.local:8940"
+    echo "  Server address:  http://${HOST}.local:$PORT"
     echo "  Auth token:      $(cat "$LOG_DIR/token")"
   fi
 fi

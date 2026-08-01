@@ -10,7 +10,7 @@ const SESSIONS_ROOT = `${homedir()}/.pi/agent/sessions`;
 const PORT = Number(process.env.PORT ?? 8940);
 // LaunchAgents get a tiny PATH — resolve `pi` explicitly so model listing and
 // RPC turns work even when ~/.local/bin isn't on it.
-const PI = [
+const PI = process.env.PI_PATH ?? [
   `${homedir()}/.local/bin/pi`,
   "/opt/homebrew/bin/pi",
   "/usr/local/bin/pi",
@@ -630,7 +630,7 @@ function isOlder(current: string, latest: string): boolean {
 }
 
 async function refreshPiVersion() {
-  const p = Bun.spawnSync(["pi", "--version"], { stdout: "pipe", stderr: "pipe" });
+  const p = Bun.spawnSync([PI, "--version"], { stdout: "pipe", stderr: "pipe", env: piEnv() });
   const raw = p.exitCode === 0
     ? (p.stdout.toString().trim() || p.stderr.toString().trim())
     : "";
@@ -752,12 +752,58 @@ type Turn = {
   pendingUI: PendingUI | null;
 };
 const turns = new Map<string, Turn>();
+let piUpdateInProgress = false;
+
+type PiUpdateError = { error: string; status: number };
+
+async function updatePiInstall(): Promise<PiVersionInfo | PiUpdateError> {
+  if (piUpdateInProgress) return { error: "Pi is already updating", status: 409 };
+  if ([...turns.values()].some((turn) => turn.running))
+    return { error: "Wait for active Pi turns to finish before updating", status: 409 };
+
+  piUpdateInProgress = true;
+  try {
+    const proc = Bun.spawn([PI, "update", "--self", "--no-approve"], {
+      cwd: homedir(),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: piEnv(),
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout as any).text(),
+      new Response(proc.stderr as any).text(),
+      proc.exited,
+    ]);
+    if (exitCode !== 0) {
+      const detail = (stderr.trim() || stdout.trim() || `pi update exited with status ${exitCode}`)
+        .replace(/\x1b\[[0-9;]*m/g, "")
+        .slice(0, 2000);
+      return { error: detail, status: 500 };
+    }
+
+    await refreshPiVersion();
+    if (!piVersionCache.current)
+      return { error: "Pi updated, but its installed version could not be verified", status: 500 };
+    if (piVersionCache.update_available)
+      return {
+        error: `Pi update finished, but ${piVersionCache.current} is still installed`,
+        status: 500,
+      };
+    await Promise.all([refreshModels(), refreshSkills()]);
+    return piVersionCache;
+  } catch (error) {
+    return { error: `Failed to update Pi: ${String(error)}`, status: 500 };
+  } finally {
+    piUpdateInProgress = false;
+  }
+}
 
 function sendMessage(
   sessionId: string,
   text: string,
   opts: { model?: string; thinking?: string; approvalMode?: string; images?: PromptImage[] } = {},
 ) {
+  if (piUpdateInProgress) return { error: "Pi is updating; try again when it finishes", status: 409 };
   const existing = turns.get(sessionId);
   if (existing?.running) return { error: "agent is already working", status: 409 };
 
@@ -974,6 +1020,12 @@ Bun.serve({
     const path = new URL(req.url).pathname;
     let m: RegExpMatchArray | null;
     try {
+      if (req.method === "POST" && path === "/pi-update") {
+        const result = await updatePiInstall();
+        return "error" in result
+          ? Response.json({ error: result.error }, { status: result.status })
+          : Response.json(result);
+      }
       if (req.method === "POST" && (m = path.match(/^\/sessions\/([^/]+)\/send$/))) {
         const { text, model, thinking, approvalMode, images } = await req.json();
         const hasImages = Array.isArray(images) && images.length > 0;
