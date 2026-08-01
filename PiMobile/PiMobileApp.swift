@@ -49,7 +49,14 @@ struct PiMobileApp: App {
                       let addr = items.first(where: { $0.name == "addr" })?.value,
                       let token = items.first(where: { $0.name == "token" })?.value else { return }
                 let name = items.first(where: { $0.name == "name" })?.value ?? "My Mac"
-                api.pair(name: name, baseURL: addr, token: token)
+                Task {
+                    do {
+                        let mac = try await api.pair(name: name, baseURL: addr, token: token)
+                        api.pairingNotice = "\(mac.name) is online and ready."
+                    } catch {
+                        api.pairingNotice = error.localizedDescription
+                    }
+                }
             }
         }
     }

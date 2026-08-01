@@ -41,6 +41,17 @@ struct ProjectsView: View {
                     Task { try? await api.addProject(path: path); await load() }
                 }
             }
+            .alert("Mac pairing", isPresented: Binding(
+                get: { api.pairingNotice != nil },
+                set: { if !$0 {
+                    api.pairingNotice = nil
+                    Task { await load() }
+                } }
+            )) {
+                Button("OK", role: .cancel) { api.pairingNotice = nil }
+            } message: {
+                Text(api.pairingNotice ?? "")
+            }
             .task { await load() }
         }
         .tint(Theme.accent)
