@@ -13,6 +13,7 @@ struct ChatView: View {
     @Environment(APIClient.self) private var api
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let workspace: Workspace
+    @State private var workspaceName: String  // tracks server-side renames (task-derived)
     @State private var liveStatus: String
     @State private var messages: [ChatMessage] = []
     @State private var draft = ""
@@ -41,6 +42,7 @@ struct ChatView: View {
 
     init(workspace: Workspace) {
         self.workspace = workspace
+        _workspaceName = State(initialValue: workspace.name)
         _liveStatus = State(initialValue: workspace.status)
     }
     /// Active turn starts at this user message; a stable "active-turn" frame
@@ -271,7 +273,7 @@ struct ChatView: View {
     private var chatToolbar: some ToolbarContent {
         ToolbarItem(placement: .principal) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(workspace.name)
+                Text(workspaceName)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
@@ -778,6 +780,11 @@ struct ChatView: View {
                }) {
                 pinnedMessageId = match.id
             }
+        }
+        // A fresh workspace is renamed server-side from its first message —
+        // pick that up so the chat header shows the task-derived name.
+        if let ws = try? await api.workspace(workspace.id) {
+            workspaceName = ws.name
         }
     }
 }

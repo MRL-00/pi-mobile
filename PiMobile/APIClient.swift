@@ -275,6 +275,7 @@ final class APIClient {
     }
 
     func workspaces(repoId: String) async throws -> [Workspace] { try await get("/repos/\(repoId)/workspaces") }
+    func workspace(_ id: String) async throws -> Workspace { try await get("/workspaces/\(id)") }
     func sessions(workspaceId: String) async throws -> [ChatSession] { try await get("/workspaces/\(workspaceId)/sessions") }
     func messages(sessionId: String) async throws -> [ChatMessage] { try await get("/sessions/\(sessionId)/messages") }
     func status(sessionId: String) async throws -> AgentStatus { try await get("/sessions/\(sessionId)/status") }

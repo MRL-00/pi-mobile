@@ -108,7 +108,8 @@ struct WorkspacesView: View {
     }
 
     // Creates a fresh worktree + session on the Mac and jumps straight into the chat.
-    // The companion server picks a city/town name (Conductor-style) for the workspace.
+    // The workspace shows a temporary "New Workspace" label until the first
+    // message, when the companion server renames it from the task.
     private func createWorkspace() async {
         creating = true
         defer { creating = false }
