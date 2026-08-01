@@ -64,11 +64,14 @@ enum TokenStore {
 enum APIError: LocalizedError {
     case badURL
     case server(status: Int, message: String)
+    case macOffline
 
     var errorDescription: String? {
         switch self {
         case .badURL: return "Invalid server URL"
         case .server(_, let message): return message
+        case .macOffline:
+            return "Couldn't reach that Mac. Make sure the companion server is running and you're on the same network (or Tailscale)."
         }
     }
 }
@@ -104,6 +107,9 @@ final class APIClient {
     var modelGroups: [ModelGroup]?
     // Installed skills from the active Mac's pi (`/skills`); empty until fetched.
     var skills: [SkillInfo] = []
+
+    /// Set after a QR pair attempt so the home screen can show success or failure.
+    var pairingNotice: String?
 
     /// Last model the user picked on this phone — reused for new sessions.
     var lastUsedModel: String? {
@@ -159,16 +165,31 @@ final class APIClient {
 
     func mac(withId id: UUID?) -> MacServer? { macs.first { $0.id == id } ?? macs.first }
 
-    // From the pairing QR the server prints: update the Mac with this address
-    // (or a placeholder-token one), else add a new entry.
-    func pair(name: String, baseURL: String, token: String) {
-        if let i = macs.firstIndex(where: { $0.baseURL == baseURL }) {
+    /// True when the companion answers `GET /repos` with this Mac's address + token.
+    func isOnline(_ mac: MacServer) async -> Bool {
+        (try? await repos(on: mac)) != nil
+    }
+
+    // From the pairing QR the server prints (or the Add Mac form): probe the
+    // companion first, then update the Mac with this address (or a
+    // placeholder-token one), else add a new entry. Offline Macs are refused.
+    @discardableResult
+    func pair(name: String, baseURL: String, token: String) async throws -> MacServer {
+        let trimmedURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        let probe = MacServer(name: name, baseURL: trimmedURL, token: trimmedToken)
+        guard await isOnline(probe) else { throw APIError.macOffline }
+
+        if let i = macs.firstIndex(where: { $0.baseURL == trimmedURL }) {
             macs[i].name = name
-            macs[i].token = token
+            macs[i].token = trimmedToken
+            activeMac = macs[i]
+            return macs[i]
         } else {
-            macs.append(MacServer(name: name, baseURL: baseURL, token: token))
+            macs.append(probe)
+            activeMac = probe
+            return probe
         }
-        activeMac = macs.first { $0.baseURL == baseURL }
     }
 
     private let decoder: JSONDecoder = {
