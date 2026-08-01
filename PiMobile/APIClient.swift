@@ -75,6 +75,8 @@ enum APIError: LocalizedError {
 
 @Observable
 final class APIClient {
+    private static let activeMacIDKey = "activeMacID"
+
     var macs: [MacServer] {
         didSet {
             UserDefaults.standard.set(try? JSONEncoder().encode(macs), forKey: "macs")
@@ -88,6 +90,11 @@ final class APIClient {
             if oldValue?.id != activeMac?.id {
                 modelGroups = nil
                 skills = []
+            }
+            if let activeMac {
+                UserDefaults.standard.set(activeMac.id.uuidString, forKey: Self.activeMacIDKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.activeMacIDKey)
             }
         }
     }
@@ -146,7 +153,8 @@ final class APIClient {
             UserDefaults.standard.set(try? JSONEncoder().encode([mac]), forKey: "macs")
             macs = [mac]
         }
-        activeMac = macs.first
+        let savedActiveMacID = UserDefaults.standard.string(forKey: Self.activeMacIDKey).flatMap(UUID.init)
+        activeMac = macs.first { $0.id == savedActiveMacID } ?? macs.first
     }
 
     func mac(withId id: UUID?) -> MacServer? { macs.first { $0.id == id } ?? macs.first }
