@@ -30,7 +30,9 @@ const TOKEN = readFileSync(tokenPath, "utf8").trim();
 // file covers the ones the phone created before their first session.
 const projectsPath = `${tokenDir}/projects.json`;
 // Entries are {path, added, name?} (older versions stored bare path strings).
-// `name` is the phone-facing workspace label (e.g. city) when we create a worktree.
+// `name` is the phone-facing workspace label: "New Workspace" when a phone
+// worktree is first created, replaced by a short task-derived name on the
+// first user message.
 type ProjectEntry = { path: string; added: number; name?: string };
 const projectEntries = (): ProjectEntry[] => {
   try {
@@ -54,6 +56,14 @@ const rememberCwd = (cwd: string, name?: string) => {
 };
 const forgetCwd = (cwd: string) => {
   writeFileSync(projectsPath, JSON.stringify(projectEntries().filter((e) => e.path !== cwd), null, 2));
+};
+// Force-overwrite a workspace's phone-facing label (temporary name → task name).
+const setStoredName = (cwd: string, name: string) => {
+  const list = projectEntries();
+  const i = list.findIndex((e) => e.path === cwd);
+  if (i >= 0) list[i] = { ...list[i], name };
+  else list.push({ path: cwd, added: Date.now(), name });
+  writeFileSync(projectsPath, JSON.stringify(list, null, 2));
 };
 
 const git = (cwd: string, ...a: string[]) => {
@@ -661,8 +671,10 @@ function createSession(workspaceId: string) {
            updated_at: new Date().toISOString() };
 }
 
-// City/town labels — same idea as Conductor desktop workspaces. Folder + branch
-// stay lowercase; the phone-facing `name` is title-cased.
+// Phone-created worktrees get a random city folder + branch (Conductor-style —
+// keeps worktree/branch names unique and stable), but the phone-facing `name`
+// is a temporary "New Workspace" label, replaced by a task-derived name on the
+// first user message.
 const CITIES = [
   "lisbon","porto","quito","nairobi","hanoi","tbilisi","perth","leipzig","malmo","bergen",
   "cusco","davao","hobart","tampere","galway","split","ankara","doha","manila","seville",
@@ -678,6 +690,28 @@ const workspaceLabel = (cwd: string) => {
   return base; // main checkout / user-added folders keep their folder name
 };
 
+// Temporary label shown until the user's first message gives us a real task.
+const NEW_WORKSPACE_LABEL = "New Workspace";
+
+// Short task-based label from the first user message: first line, markdown
+// stripped, capped on a word boundary. Empty → keep the temporary label
+// (e.g. an image-only first message).
+const taskNameFrom = (text: string): string => {
+  // Drop fenced code blocks first, then take the first non-empty line.
+  const firstLine = text.replace(/```[\s\S]*?```/g, " ").split("\n").find((l) => l.trim()) ?? "";
+  const cleaned = firstLine
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // links keep their visible text
+    .replace(/[#>*_`~|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+  const MAX = 50;
+  if (cleaned.length <= MAX) return cleaned;
+  const cut = cleaned.slice(0, MAX + 1);
+  const space = cut.lastIndexOf(" ");
+  return (space > MAX * 0.6 ? cut.slice(0, space) : cut.slice(0, MAX)).trimEnd() + "…";
+};
+
 function createWorkspace(repoId: string) {
   const root = scanned().repoRoots.get(repoId);
   if (!root || !existsSync(root)) return { error: "repo not found", status: 404 };
@@ -686,17 +720,18 @@ function createWorkspace(repoId: string) {
   const base = `${homedir()}/pi-workspaces/${repoName}`;
   const unused = CITIES.filter((c) => !existsSync(`${base}/${c}`));
   const city = unused.length ? unused[Math.floor(Math.random() * unused.length)] : `mobile-${Date.now()}`;
-  const label = titleCase(city);
   const path = `${base}/${city}`;
   const branch = `mobile/${city}`;
   mkdirSync(base, { recursive: true });
   const wt = Bun.spawnSync(["git", "worktree", "add", "-b", branch, path], { cwd: root, stdout: "pipe", stderr: "pipe" });
   if (wt.exitCode !== 0)
     return { error: `git worktree failed: ${wt.stderr.toString().trim()}`, status: 500 };
-  rememberCwd(path, label);
+  // Temporary phone-facing label; the first user message replaces it with a
+  // short task-derived name (folder + branch keep the city id).
+  rememberCwd(path, NEW_WORKSPACE_LABEL);
   scanCache = null;
   const id = encodeCwd(path);
-  return { id, repository_id: repoId, name: label, branch, status: "not-started", unread: false,
+  return { id, repository_id: repoId, name: NEW_WORKSPACE_LABEL, branch, status: "not-started", unread: false,
            updated_at: new Date().toISOString(), last_message_snippet: null, session: createSession(id) };
 }
 
@@ -730,6 +765,13 @@ function sendMessage(
   const cwd = found?.cwd ?? pendingSessions.get(sessionId);
   if (!cwd) return { error: "session not found", status: 404 };
   if (!existsSync(cwd)) return { error: "workspace directory not found on this Mac", status: 400 };
+
+  // First message in a brand-new workspace: swap the temporary "New Workspace"
+  // label for a short name derived from the task itself.
+  if (!found && (scanned().workspaces.get(encodeCwd(cwd))?.sessionCount ?? 0) === 0) {
+    const name = taskNameFrom(text);
+    if (name) setStoredName(cwd, name);
+  }
 
   const approvalMode = (opts.approvalMode ?? "auto").toLowerCase() === "ask" ? "ask" : "auto";
   const args = [PI, "--mode", "rpc"];
@@ -882,23 +924,25 @@ function workspaceStatus(ws: Ws): string {
   return "done";
 }
 
+const workspaceJSON = (id: string, ws: Ws, repoId: string) => {
+  const newest = ws.dir ? sessionFiles(ws.dir)[0] : null;
+  return {
+    id,
+    repository_id: repoId,
+    name: workspaceLabel(ws.cwd),
+    branch: git(ws.cwd, "branch", "--show-current"),
+    status: workspaceStatus(ws),
+    unread: false,
+    updated_at: new Date(ws.mtime).toISOString(),
+    last_message_snippet: newest ? sessionSummary(`${ws.dir}/${newest}`, id).title : null,
+  };
+};
+
 const workspacesOf = (repoId: string) => {
   const { workspaces, repoOf } = scanned();
   return [...workspaces]
     .filter(([id]) => repoOf.get(id) === repoId)
-    .map(([id, ws]) => {
-      const newest = ws.dir ? sessionFiles(ws.dir)[0] : null;
-      return {
-        id,
-        repository_id: repoId,
-        name: workspaceLabel(ws.cwd),
-        branch: git(ws.cwd, "branch", "--show-current"),
-        status: workspaceStatus(ws),
-        unread: false,
-        updated_at: new Date(ws.mtime).toISOString(),
-        last_message_snippet: newest ? sessionSummary(`${ws.dir}/${newest}`, id).title : null,
-      };
-    })
+    .map(([id, ws]) => workspaceJSON(id, ws, repoId))
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
 };
 
@@ -972,6 +1016,13 @@ Bun.serve({
         forgetCwd(ws.cwd);
         scanCache = null;
         return Response.json({ ok: true });
+      }
+      // Single workspace — the chat header re-reads its name after a rename.
+      if (req.method === "GET" && (m = path.match(/^\/workspaces\/([^/]+)$/))) {
+        const { workspaces, repoOf } = scanned();
+        const ws = workspaces.get(m[1]);
+        if (!ws) return Response.json({ error: "workspace not found" }, { status: 404 });
+        return Response.json(workspaceJSON(m[1], ws, repoOf.get(m[1]) ?? ""));
       }
       if (req.method === "POST" && (m = path.match(/^\/sessions\/([^/]+)\/stop$/))) {
         const t = turns.get(m[1]);
