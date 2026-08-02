@@ -199,13 +199,22 @@ final class APIClient {
         return d
     }()
 
-    private func get<T: Decodable>(_ path: String, on mac: MacServer? = nil) async throws -> T {
+    private func get<T: Decodable>(
+        _ path: String,
+        on mac: MacServer? = nil,
+        timeoutInterval: TimeInterval = 60
+    ) async throws -> T {
         guard let mac = mac ?? activeMac, let url = URL(string: mac.baseURL + path) else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
+        request.timeoutInterval = timeoutInterval
         request.setValue("Bearer \(mac.token)", forHTTPHeaderField: "Authorization")
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw URLError(.badServerResponse)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        guard http.statusCode == 200 else {
+            let message = (try? JSONDecoder().decode([String: String].self, from: data))?["error"]
+                ?? String(data: data, encoding: .utf8)
+                ?? "Request failed (\(http.statusCode))"
+            throw APIError.server(status: http.statusCode, message: message)
         }
         return try decoder.decode(T.self, from: data)
     }
@@ -240,7 +249,9 @@ final class APIClient {
         try await post(path, body: [String: String]())
     }
 
-    func repos(on mac: MacServer) async throws -> [Repo] { try await get("/repos", on: mac) }
+    func repos(on mac: MacServer, timeoutInterval: TimeInterval = 8) async throws -> [Repo] {
+        try await get("/repos", on: mac, timeoutInterval: timeoutInterval)
+    }
     func piVersion(on mac: MacServer) async throws -> PiVersionInfo { try await get("/pi-version", on: mac) }
     func updatePi(on mac: MacServer) async throws -> PiVersionInfo {
         let data = try await post(
