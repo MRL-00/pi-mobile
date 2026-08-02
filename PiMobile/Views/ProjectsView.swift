@@ -2,10 +2,14 @@ import SwiftUI
 
 struct ProjectsView: View {
     @Environment(APIClient.self) private var api
+    @Environment(\.scenePhase) private var scenePhase
     @State private var allRepos: [Repo] = []
     @State private var onlineMacs: Set<UUID> = []
+    @State private var isCheckingMacs = true
+    @State private var activeLoadID = UUID()
     @State private var showSettings = false
     @State private var showAddProject = false
+    @State private var addProjectError: String?
     @State private var resolvedInitialMac = false
 
     private var selectedMac: MacServer? {
@@ -44,28 +48,39 @@ struct ProjectsView: View {
                     .padding(.top, 4)
                     .padding(.bottom, 40)
                 }
-                .refreshable { await load() }
+                .refreshable { await load(maxAttempts: 1) }
             }
             .background(Theme.bg)
             .navigationDestination(for: Repo.self) { WorkspacesView(repo: $0) }
-            .sheet(isPresented: $showSettings, onDismiss: { Task { await load() } }) { SettingsView() }
+            .sheet(isPresented: $showSettings, onDismiss: { Task { await load(maxAttempts: 1) } }) { SettingsView() }
             .sheet(isPresented: $showAddProject) {
                 FolderPickerView { path in
-                    Task { try? await api.addProject(path: path); await load() }
+                    Task { await addProject(path) }
                 }
             }
             .alert("Mac pairing", isPresented: Binding(
                 get: { api.pairingNotice != nil },
                 set: { if !$0 {
                     api.pairingNotice = nil
-                    Task { await load() }
+                    Task { await load(maxAttempts: 1) }
                 } }
             )) {
                 Button("OK", role: .cancel) { api.pairingNotice = nil }
             } message: {
                 Text(api.pairingNotice ?? "")
             }
-            .task { await load() }
+            .alert("Couldn't Add Project", isPresented: Binding(
+                get: { addProjectError != nil },
+                set: { if !$0 { addProjectError = nil } }
+            )) {
+                Button("OK", role: .cancel) { addProjectError = nil }
+            } message: {
+                Text(addProjectError ?? "")
+            }
+            .task(id: scenePhase) {
+                guard scenePhase == .active else { return }
+                await load(maxAttempts: 3)
+            }
         }
         .tint(Theme.accent)
     }
@@ -99,7 +114,7 @@ struct ProjectsView: View {
                         ForEach(api.macs) { mac in
                             Button { api.activeMac = mac } label: {
                                 Label(
-                                    "\(mac.name) · \(onlineMacs.contains(mac.id) ? "online" : "offline")",
+                                    "\(mac.name) · \(macStatusLabel(mac))",
                                     systemImage: mac.id == selectedMac?.id ? "checkmark.circle.fill" : "circle"
                                 )
                             }
@@ -138,13 +153,21 @@ struct ProjectsView: View {
 
     private var macPillLabel: String {
         guard let selectedMac else { return "Choose a Mac" }
-        return "\(selectedMac.name) · \(connected ? "online" : "offline")"
+        return "\(selectedMac.name) · \(macStatusLabel(selectedMac))"
+    }
+
+    private func macStatusLabel(_ mac: MacServer) -> String {
+        onlineMacs.contains(mac.id) ? "online" : (isCheckingMacs ? "checking…" : "offline")
     }
 
     private var subtitle: String {
-        connected
-            ? "\(repos.count) projects · \(repos.reduce(0) { $0 + $1.activeWorkspaceCount }) active workspaces"
-            : "\(selectedMac?.name ?? "This Mac") is offline. Choose another Mac or check its settings."
+        if connected {
+            return "\(repos.count) projects · \(repos.reduce(0) { $0 + $1.activeWorkspaceCount }) active workspaces"
+        }
+        if isCheckingMacs {
+            return "Checking \(selectedMac?.name ?? "your Mac")…"
+        }
+        return "\(selectedMac?.name ?? "This Mac") is offline. Choose another Mac or check its settings."
     }
 
     private var repoCard: some View {
@@ -187,11 +210,14 @@ struct ProjectsView: View {
         .overlay(RoundedRectangle(cornerRadius: 24).strokeBorder(Theme.border, lineWidth: 0.5))
     }
 
-    private func load() async {
+    private func load(maxAttempts: Int) async {
+        let loadID = UUID()
+        activeLoadID = loadID
+        isCheckingMacs = true
         var all: [Repo] = []
         var online: Set<UUID> = []
         for mac in api.macs {
-            if let macRepos = try? await api.repos(on: mac) {
+            if let macRepos = await reposWithRetry(on: mac, maxAttempts: maxAttempts) {
                 online.insert(mac.id)
                 for var r in macRepos {
                     r.macId = mac.id
@@ -199,6 +225,9 @@ struct ProjectsView: View {
                 }
             }
         }
+        // A later foreground/manual refresh supersedes this result. This also
+        // prevents a slow initial probe from overwriting a completed pull refresh.
+        guard activeLoadID == loadID else { return }
         if let activeID = api.activeMac?.id,
            !api.macs.contains(where: { $0.id == activeID }) {
             api.activeMac = api.macs.first
@@ -212,6 +241,32 @@ struct ProjectsView: View {
         }
         allRepos = all
         onlineMacs = online
+        isCheckingMacs = false
+    }
+
+    private func addProject(_ path: String) async {
+        do {
+            try await api.addProject(path: path)
+            await load(maxAttempts: 1)
+        } catch {
+            addProjectError = error.localizedDescription
+        }
+    }
+
+    /// A freshly foregrounded phone can briefly have no LAN/Tailscale route.
+    /// Retry transient failures here so opening Manage Macs is not what wakes
+    /// the connection and makes the same server suddenly appear online.
+    private func reposWithRetry(on mac: MacServer, maxAttempts: Int) async -> [Repo]? {
+        for attempt in 0..<maxAttempts {
+            if Task.isCancelled { return nil }
+            // Manual refresh gets one bounded attempt; startup gets a few short
+            // attempts to allow the LAN/Tailscale route to wake up.
+            let timeout: TimeInterval = maxAttempts == 1 ? 6 : 4
+            if let repos = try? await api.repos(on: mac, timeoutInterval: timeout) { return repos }
+            guard attempt < maxAttempts - 1 else { break }
+            try? await Task.sleep(for: .milliseconds(500 * (attempt + 1)))
+        }
+        return nil
     }
 }
 
@@ -262,13 +317,20 @@ struct FolderPickerView: View {
                         Spacer()
                     }
                     .listRowBackground(Color.clear)
-                } else if let browseError, listing == nil {
-                    ContentUnavailableView(
-                        "Couldn't Load Folders",
-                        systemImage: "folder.badge.questionmark",
-                        description: Text(browseError)
-                    )
-                    .listRowBackground(Color.clear)
+                } else if let browseError {
+                    if listing == nil {
+                        ContentUnavailableView(
+                            "Couldn't Load Folders",
+                            systemImage: "folder.badge.questionmark",
+                            description: Text(browseError)
+                        )
+                        .listRowBackground(Color.clear)
+                    } else {
+                        Label(browseError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .listRowBackground(Color.clear)
+                    }
                 }
                 if let parent = listing?.parent {
                     Button { Task { await open(parent) } } label: {
@@ -292,7 +354,7 @@ struct FolderPickerView: View {
                     Button("Add This Folder") {
                         if let path = listing?.path { onPick(path); dismiss() }
                     }
-                    .disabled(listing == nil)
+                    .disabled(listing == nil || isLoading)
                 }
             }
             .task { await open(nil) }
