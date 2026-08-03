@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-KEY_ID=ZK29G6VJ93
+KEY_ID=Q62872XNN8
 ISSUER_ID=a3f9067b-dd48-45c5-ac8d-f78f15d3a4cb
 KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8"
 AUTH=(-allowProvisioningUpdates

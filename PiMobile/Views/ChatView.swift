@@ -19,7 +19,6 @@ struct ChatView: View {
     @State private var draft = ""
     @State private var sessions: [ChatSession] = []
     @State private var session: ChatSession?
-    @State private var creatingSession = false
     @State private var showDiff = false
     @State private var diffStat: DiffStat?
     private var sessionId: String? { session?.id }
@@ -286,40 +285,6 @@ struct ChatView: View {
                 }
             }
         }
-        ToolbarItem(placement: .topBarTrailing) {
-            Menu {
-                Button {
-                    Task { await createNewSession() }
-                } label: {
-                    Label("New Session", systemImage: "square.and.pencil")
-                }
-
-                if !sessions.isEmpty {
-                    Divider()
-                    Section("Sessions") {
-                        ForEach(sessions) { item in
-                            Button {
-                                Task { await selectSession(item) }
-                            } label: {
-                                Label(
-                                    item.title,
-                                    systemImage: item.id == sessionId ? "checkmark.circle.fill" : "bubble.left"
-                                )
-                            }
-                        }
-                    }
-                }
-            } label: {
-                if creatingSession {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "bubble.left.and.text.bubble.right")
-                }
-            }
-            .disabled(running || creatingSession)
-            .accessibilityLabel("Sessions")
-        }
-        .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .topBarTrailing) {
             if let stat = diffStat, !stat.isEmpty {
                 Button { showDiff = true } label: {
@@ -797,42 +762,6 @@ struct ChatView: View {
             activity = status.activity
             await poll()
         } else if !running {
-            liveStatus = messages.isEmpty ? "not-started" : "done"
-        }
-    }
-
-    private func createNewSession() async {
-        creatingSession = true
-        defer { creatingSession = false }
-        do {
-            let created = try await api.createSession(workspaceId: workspace.id)
-            sessions.insert(created, at: 0)
-            await selectSession(created)
-        } catch {
-            alertMessage = "Couldn't create session. \(error.localizedDescription)"
-        }
-    }
-
-    private func selectSession(_ selected: ChatSession) async {
-        guard selected.id != sessionId else { return }
-        endTurnPin()
-        session = selected
-        messages = []
-        activity = ""
-        pendingUI = nil
-        model = selected.model ?? api.lastUsedModel
-        thinking = selected.model == nil ? api.lastUsedThinking : nil
-        liveStatus = "not-started"
-
-        await refresh()
-        scrollToLatest()
-        if let status = try? await api.status(sessionId: selected.id), status.running {
-            running = true
-            liveStatus = "in-progress"
-            activity = status.activity
-            await poll()
-        } else {
-            running = false
             liveStatus = messages.isEmpty ? "not-started" : "done"
         }
     }
