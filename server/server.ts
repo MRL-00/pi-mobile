@@ -1278,9 +1278,13 @@ Bun.serve({
       if (req.method === "POST" && (m = path.match(/^\/sessions\/([^/]+)\/stop$/))) {
         const bridge = bridgeFor(m[1]);
         if (bridge) {
-          // A late stop must not abort a newer turn: the bridge skips it after the deadline.
-          bridgeEnqueue(bridge, { id: crypto.randomUUID(), type: "stop", deadline: Date.now() + 5_000 });
-          return Response.json({ ok: true });
+          // Wait for the ack like /send. The bridge skips a late stop (deadline), so it
+          // cannot abort a newer turn, and the phone gets an error, not a false ok.
+          const r = await bridgeCommand(bridge, { id: crypto.randomUUID(), type: "stop" });
+          if (r.ok) return Response.json({ ok: true });
+          return r.error === "timeout"
+            ? Response.json({ error: "terminal pi did not answer" }, { status: 504 })
+            : Response.json({ error: `terminal pi: ${r.error ?? "unknown error"}` }, { status: 502 });
         }
         const t = turns.get(m[1]);
         try { t?.proc?.stdin?.write(JSON.stringify({ id: "stop", type: "abort" }) + "\n"); } catch (e) {

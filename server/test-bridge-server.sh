@@ -60,11 +60,13 @@ req GET /sessions/s1/status | grep -q '"running":true,"activity":"bash sleep 5"'
 # E. send while running → 409
 [[ "$(req POST /sessions/s1/send '{"text":"x"}')" == '409 {"error":"agent is already working"}' ]] || fail "E1 busy 409"
 
-# F. stop → stop command delivered
+# F. stop → stop command delivered → ack → 200
 poll "$REG" > "$T/p2" & P=$!; sleep 0.3
-[[ "$(req POST /sessions/s1/stop | cut -c1-3)" == 200 ]] || fail "F1 stop 200"
+req POST /sessions/s1/stop > "$T/stop" & S=$!
 wait $P; grep -q '"type":"stop"' "$T/p2" || fail "F1 stop command, got $(cat "$T/p2")"
 grep -q '"type":"stop","deadline":[0-9]' "$T/p2" || fail "F1b stop carries a deadline"
+req POST /bridge/event "{\"pid\":4242,\"result\":{\"id\":\"$(id_of < "$T/p2")\",\"ok\":true}}" >/dev/null
+wait $S; grep -q '^200 {"ok":true}' "$T/stop" || fail "F1c stop 200 after ack, got $(cat "$T/stop")"
 # F2. a second poll from the same pid releases the first with [] (Review Focus 2)
 poll "$REG" > "$T/p3" & P=$!; sleep 0.3
 poll "$REG" > "$T/p4" & P2=$!
@@ -115,6 +117,10 @@ req POST /sessions/s3/stop >/dev/null
 wait $P; [[ "$(cat "$T/p7")" == '{"commands":[]}' ]] || fail "M4 stop goes to the rpc turn, not the bridge"
 for _ in $(seq 1 10); do req GET /sessions/s3/status | grep -q '"running":false' && break; sleep 0.3; done
 req GET /sessions/s3/status | grep -q '"running":false' || fail "M5 rpc turn stopped"
+
+# N. stop that the bridge never collects → 504, not a false ok
+poll '{"pid":8888,"session_id":"s5","cwd":"/tmp/p","idle":false}' >/dev/null # hold ends, no waiter left
+[[ "$(req POST /sessions/s5/stop)" == '504 {"error":"terminal pi did not answer"}' ]] || fail "N1 uncollected stop → 504"
 
 # K. non-loopback source → 403
 LAN="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
