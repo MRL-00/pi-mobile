@@ -154,6 +154,7 @@ case "$CMD" in
   uninstall)
     stop_service
     rm -f "$ALWAYS_PLIST" "$DEMAND_PLIST"
+    PATH="$AGENT_PATH:$PATH" pi remove "$LOG_DIR/pi-mobile-bridge" >/dev/null 2>&1 || true
     [[ -L "$LINK" ]] && rm -f "$LINK"
     echo "Uninstalled."
     exit 0 ;;
@@ -176,6 +177,10 @@ elif [[ -f "$DIR/server.ts" ]]; then
     rm -rf "$LOG_DIR/pi-mobile-approval"
     cp -R "$DIR/pi-mobile-approval" "$LOG_DIR/pi-mobile-approval"
   fi
+  if [[ -d "$DIR/pi-mobile-bridge" ]]; then
+    rm -rf "$LOG_DIR/pi-mobile-bridge"
+    cp -R "$DIR/pi-mobile-bridge" "$LOG_DIR/pi-mobile-bridge"
+  fi
 else
   echo "Downloading server.ts…"
   curl -fsSL "$REPO_RAW/server.ts" -o "$LOG_DIR/server.ts"
@@ -184,6 +189,10 @@ else
   mkdir -p "$LOG_DIR/pi-mobile-approval"
   curl -fsSL "$REPO_RAW/pi-mobile-approval/extension.ts" -o "$LOG_DIR/pi-mobile-approval/extension.ts"
   curl -fsSL "$REPO_RAW/pi-mobile-approval/package.json" -o "$LOG_DIR/pi-mobile-approval/package.json"
+  echo "Downloading pi-mobile-bridge…"
+  mkdir -p "$LOG_DIR/pi-mobile-bridge"
+  curl -fsSL "$REPO_RAW/pi-mobile-bridge/extension.ts" -o "$LOG_DIR/pi-mobile-bridge/extension.ts"
+  curl -fsSL "$REPO_RAW/pi-mobile-bridge/package.json" -o "$LOG_DIR/pi-mobile-bridge/package.json"
 fi
 chmod +x "$LOG_DIR/install.sh"
 ln -sf "$LOG_DIR/install.sh" "$LINK"
@@ -202,6 +211,16 @@ if [[ -f "$LEGACY_PLIST" ]]; then
   echo "Stopping legacy Conductor companion (conflicts on port 8940)…"
   launchctl bootout "gui/$(id -u)" "$LEGACY_PLIST" 2>/dev/null || true
   mv "$LEGACY_PLIST" "${LEGACY_PLIST}.disabled"
+fi
+
+# Terminal bridge: lets the phone see, stop and message terminal pi sessions.
+# Optional: a failed install only loses that feature.
+if [[ -f "$DIR/pi-mobile-bridge/extension.ts" ]]; then
+  if PATH="$AGENT_PATH:$PATH" pi install "$DIR/pi-mobile-bridge" >/dev/null 2>&1; then
+    echo "Installed the pi-mobile-bridge Pi extension (terminal pi sessions started from now on connect to the phone)."
+  else
+    echo "warning: 'pi install $DIR/pi-mobile-bridge' failed — the phone cannot drive terminal pi sessions." >&2
+  fi
 fi
 
 stop_service
