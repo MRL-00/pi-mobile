@@ -13,12 +13,14 @@ const TOKEN_PATH = `${homedir()}/.pi-companion/token`;
 type Command =
   | { id: string; type: "send"; text: string; images?: { type: "image"; data: string; mimeType: string }[] }
   | { id: string; type: "stop" };
+type Wire = Command & { deadline?: number }; // deadline: epoch ms, set by the server
 
 export default function (pi: ExtensionAPI) {
   if (process.env.PI_MOBILE_RPC === "1") return; // a pi the companion server started itself
 
   let ctx: any = null;
   let active = false;
+  let looping = false; // a loop in its backoff sleep can outlive a session restart
   let pollAbort: AbortController | null = null;
 
   const token = () => { try { return readFileSync(TOKEN_PATH, "utf8").trim(); } catch { return null; } };
@@ -40,7 +42,9 @@ export default function (pi: ExtensionAPI) {
   const event = (body: Record<string, unknown>) =>
     post("/bridge/event", { session_id: ctx?.sessionManager.getSessionId(), ...body }).catch(() => {});
 
-  function run(c: Command) {
+  function run(c: Wire) {
+    // The server already answered "timeout" to the phone: do not run it late.
+    if (c.deadline && Date.now() > c.deadline) return void event({ result: { id: c.id, ok: false, error: "expired" } });
     try {
       if (c.type === "send") {
         // Pi rejects a send without deliverAs while busy, and only the terminal sees that error.
@@ -59,6 +63,11 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function loop() {
+    looping = true;
+    try { await pollLoop(); } finally { looping = false; }
+  }
+
+  async function pollLoop() {
     let delay = 1_000;
     while (active) {
       try {
@@ -70,7 +79,7 @@ export default function (pi: ExtensionAPI) {
           idle: ctx.isIdle(),
         }, pollAbort.signal);
         delay = 1_000;
-        for (const c of (commands ?? []) as Command[]) run(c);
+        for (const c of (commands ?? []) as Wire[]) run(c);
       } catch {
         if (!active) return;
         await new Promise((r) => setTimeout(r, delay));
@@ -83,7 +92,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_e, c) => {
     if (c.mode !== "tui") return; // hasUI is also true in rpc mode
     ctx = c; // /new and /resume fire session_start again; the next poll carries the new id
-    if (!active) { active = true; void loop(); }
+    active = true;
+    if (!looping) void loop();
   });
   pi.on("agent_start", () => { if (active) event({ state: "running" }); });
   pi.on("tool_execution_start", (e) => {

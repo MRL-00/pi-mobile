@@ -1014,12 +1014,14 @@ type BridgeImage = { type: "image"; data: string; mimeType: string };
 type BridgeCommand =
   | { id: string; type: "send"; text: string; images?: BridgeImage[] }
   | { id: string; type: "stop" };
+// deadline (epoch ms): the bridge skips a command it gets too late. Same Mac, same clock.
+type BridgeWireCommand = BridgeCommand & { deadline: number };
 type BridgeResult = { id: string; ok: boolean; error?: string };
 type Bridge = {
   pid: number; sessionId: string; sessionFile: string; cwd: string;
   running: boolean; activity: string; lastSeen: number; sentAt: number;
-  queue: BridgeCommand[];
-  waiter: ((cmds: BridgeCommand[]) => void) | null;
+  queue: BridgeWireCommand[];
+  waiter: ((cmds: BridgeWireCommand[]) => void) | null;
   results: Map<string, (r: BridgeResult) => void>;
 };
 const BRIDGE_HOLD_MS = Number(process.env.BRIDGE_HOLD_MS ?? 25_000);
@@ -1048,6 +1050,8 @@ const bridgeRunningIn = (cwd: string) =>
 function bridgeUpsert(body: any): Bridge | null {
   const pid = Number(body?.pid);
   if (!Number.isInteger(pid) || pid <= 0 || typeof body?.session_id !== "string" || !body.session_id) return null;
+  // Drop expired bridges (a terminal that died without `gone`). A recycled pid then gets a fresh entry.
+  for (const [p, x] of bridges) if (!bridgeAlive(x)) { x.waiter?.([]); bridges.delete(p); }
   let b = bridges.get(pid);
   if (!b) {
     b = { pid, sessionId: "", sessionFile: "", cwd: "", running: body.idle === false, activity: "",
@@ -1066,25 +1070,26 @@ function bridgeUpsert(body: any): Bridge | null {
   return b;
 }
 
-function bridgePoll(b: Bridge): Promise<BridgeCommand[]> {
+function bridgePoll(b: Bridge): Promise<BridgeWireCommand[]> {
   b.waiter?.([]); // a newer poll replaces an older one
   b.waiter = null;
   if (b.queue.length) return Promise.resolve(b.queue.splice(0));
   return new Promise((resolve) => {
-    const done = (cmds: BridgeCommand[]) => { clearTimeout(timer); resolve(cmds); };
+    const done = (cmds: BridgeWireCommand[]) => { clearTimeout(timer); resolve(cmds); };
     const timer = setTimeout(() => { if (b.waiter === done) b.waiter = null; resolve([]); }, BRIDGE_HOLD_MS);
     b.waiter = done;
   });
 }
 
-function bridgeEnqueue(b: Bridge, cmd: BridgeCommand) {
+function bridgeEnqueue(b: Bridge, cmd: BridgeWireCommand) {
   b.queue.push(cmd);
   const w = b.waiter;
   if (w) { b.waiter = null; w(b.queue.splice(0)); }
 }
 
 // Queue a command and wait for the bridge's result. On timeout the command is
-// dropped, so it never runs late.
+// dropped from the queue. A command already delivered carries a deadline, so
+// the bridge skips it when it arrives late.
 function bridgeCommand(b: Bridge, cmd: BridgeCommand, timeoutMs = 5_000): Promise<BridgeResult> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
@@ -1093,7 +1098,7 @@ function bridgeCommand(b: Bridge, cmd: BridgeCommand, timeoutMs = 5_000): Promis
       resolve({ id: cmd.id, ok: false, error: "timeout" });
     }, timeoutMs);
     b.results.set(cmd.id, (r) => { clearTimeout(timer); b.results.delete(cmd.id); resolve(r); });
-    bridgeEnqueue(b, cmd);
+    bridgeEnqueue(b, { ...cmd, deadline: Date.now() + timeoutMs });
   });
 }
 

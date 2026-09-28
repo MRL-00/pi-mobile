@@ -209,13 +209,14 @@ type BridgeCommand =
 type BridgeResult = { id: string; ok: boolean; error?: string };
 type Bridge = {
   pid: number; sessionId: string; sessionFile: string; cwd: string;
-  running: boolean; activity: string; lastSeen: number;
+  running: boolean; activity: string; lastSeen: number; sentAt: number;
   queue: BridgeCommand[];
   waiter: ((cmds: BridgeCommand[]) => void) | null;
   results: Map<string, (r: BridgeResult) => void>;
 };
 const BRIDGE_HOLD_MS = Number(process.env.BRIDGE_HOLD_MS ?? 25_000);
 const BRIDGE_TTL_MS = Number(process.env.BRIDGE_TTL_MS ?? 40_000);
+const BRIDGE_SEND_GRACE_MS = Number(process.env.BRIDGE_SEND_GRACE_MS ?? 10_000);
 const bridges = new Map<number, Bridge>(); // key: terminal pi pid
 
 const isLoopback = (ip?: string) => ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
@@ -237,10 +238,16 @@ function bridgeUpsert(body: any): Bridge | null {
   let b = bridges.get(pid);
   if (!b) {
     b = { pid, sessionId: "", sessionFile: "", cwd: "", running: body.idle === false, activity: "",
-          lastSeen: 0, queue: [], waiter: null, results: new Map() };
+          lastSeen: 0, sentAt: 0, queue: [], waiter: null, results: new Map() };
     bridges.set(pid, b);
   }
-  // After registration, only events change `running` (a poll's idle flag can lag a send).
+  // After registration, events drive `running`. A poll's idle flag can lag a
+  // send, so it only clears a flag that stayed set past the grace
+  // (BRIDGE_SEND_GRACE_MS, default 10 s; bridgeSend sets b.sentAt on ack).
+  // Without it, a send that fails before agent_start leaves `running` stuck.
+  if (body.idle === true && b.running && Date.now() - b.sentAt > BRIDGE_SEND_GRACE_MS) {
+    b.running = false; b.activity = "";
+  }
   b.sessionId = body.session_id;
   if (typeof body.session_file === "string") b.sessionFile = body.session_file;
   if (typeof body.cwd === "string") b.cwd = body.cwd;
@@ -351,7 +358,8 @@ In `fetch`, right after `let m: RegExpMatchArray | null;` and `try {`, add:
         const r = bridge
           ? await bridgeSend(bridge, (text ?? "").trim(), images)
           : sendMessage(m[1], (text ?? "").trim(), { model, thinking, approvalMode, images });
-        return Response.json(r, { status: "status" in r ? (r.status as number) : 200 });
+        // The app decodes error bodies as [String: String], so send only "error".
+        return "status" in r ? Response.json({ error: r.error }, { status: r.status as number }) : Response.json(r);
 ```
 
 `/stop` — add at the top of the route:

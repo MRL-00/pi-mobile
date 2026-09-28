@@ -44,6 +44,7 @@ req GET /bridge/list | grep -q '"pid":4242' || fail "B3 list shows bridge"
 poll "$REG" > "$T/p1" & P=$!; sleep 0.3
 req POST /sessions/s1/send '{"text":"hi","model":"x/y"}' > "$T/send" & S=$!
 wait $P; grep -q '"type":"send","text":"hi"' "$T/p1" || fail "C1 send command, got $(cat "$T/p1")"
+grep -q '"deadline":[0-9]' "$T/p1" || fail "C1b command carries a deadline"
 CID="$(id_of < "$T/p1")"
 req POST /bridge/event "{\"pid\":4242,\"result\":{\"id\":\"$CID\",\"ok\":true}}" >/dev/null
 wait $S; grep -q '^200 {"ok":true}' "$T/send" || fail "C2 send 200, got $(cat "$T/send")"
