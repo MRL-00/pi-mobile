@@ -64,6 +64,7 @@ req GET /sessions/s1/status | grep -q '"running":true,"activity":"bash sleep 5"'
 poll "$REG" > "$T/p2" & P=$!; sleep 0.3
 [[ "$(req POST /sessions/s1/stop | cut -c1-3)" == 200 ]] || fail "F1 stop 200"
 wait $P; grep -q '"type":"stop"' "$T/p2" || fail "F1 stop command, got $(cat "$T/p2")"
+grep -q '"type":"stop","deadline":[0-9]' "$T/p2" || fail "F1b stop carries a deadline"
 # F2. a second poll from the same pid releases the first with [] (Review Focus 2)
 poll "$REG" > "$T/p3" & P=$!; sleep 0.3
 poll "$REG" > "$T/p4" & P2=$!

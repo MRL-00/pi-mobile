@@ -1278,7 +1278,8 @@ Bun.serve({
       if (req.method === "POST" && (m = path.match(/^\/sessions\/([^/]+)\/stop$/))) {
         const bridge = bridgeFor(m[1]);
         if (bridge) {
-          bridgeEnqueue(bridge, { id: crypto.randomUUID(), type: "stop" });
+          // A late stop must not abort a newer turn: the bridge skips it after the deadline.
+          bridgeEnqueue(bridge, { id: crypto.randomUUID(), type: "stop", deadline: Date.now() + 5_000 });
           return Response.json({ ok: true });
         }
         const t = turns.get(m[1]);
